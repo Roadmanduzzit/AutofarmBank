@@ -1,0 +1,343 @@
+--[[
+    GEMINI BANK AUTO - SINGLE PASSIVE START
+    UI: Custom (1:1 v3 Design)
+    Method: TweenService Slide
+    Features: 
+    1. Auto-Buy Drill/Duffel (Smart)
+    2. Smart Gold Collection
+    3. Death Check (Skips to AFK)
+    4. Passive Mode: Activates ONCE at start (Never loops)
+]]
+
+print("Gemini Bank: Loading Single Passive Start...")
+
+-- // 1. SERVICES //
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- // 2. CONFIGURATION //
+local Config = {
+    Enabled = false,
+    Speed = 30 -- Max Speed
+}
+
+-- // 3. LOGIC FUNCTIONS //
+
+-- PASSIVE MODE (Single Trigger)
+local function TogglePassiveMode()
+    local pm = ReplicatedStorage:FindFirstChild("PassiveMode")
+    if pm then
+        pm:FireServer("Toggle")
+        print("🛡️ Passive Mode Triggered (Start Only)")
+    else
+        print("⚠️ Warning: PassiveMode Remote not found!")
+    end
+end
+
+-- Helper: Check if Alive
+local function IsAlive()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    return true
+end
+
+-- Helper: Slide/Tween
+local function SlideTo(targetPos)
+    if not IsAlive() then return false end
+    local char = LocalPlayer.Character
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+
+    local dist = (root.Position - targetPos).Magnitude
+    local time = dist / Config.Speed
+    
+    local tweenInfo = TweenInfo.new(time, Enum.EasingStyle.Linear)
+    local goal = {CFrame = CFrame.new(targetPos)}
+    
+    local tween = TweenService:Create(root, tweenInfo, goal)
+    tween:Play()
+    
+    local passed = 0
+    while passed < time do
+        if not Config.Enabled then tween:Cancel(); return false end
+        if not IsAlive() then tween:Cancel(); return false end
+        task.wait(0.1)
+        passed = passed + 0.1
+    end
+    return true
+end
+
+-- SHOP SEQUENCE
+local function AutobuyforBank()
+    local hasDrill = false
+    if LocalPlayer.Backpack:FindFirstChild("Drill") then hasDrill = true end
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Drill") then hasDrill = true end
+
+    if hasDrill then
+        print("✅ Drill found! Skipping Shop...")
+        return true
+    end
+
+    print("🛒 Starting Shop Sequence...")
+    
+    if not SlideTo(Vector3.new(256, 4, 428)) then return false end
+    task.wait(1)
+    if not IsAlive() then return false end
+
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+    task.wait(0.1)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    task.wait(0.5)
+
+    local GunDealer = ReplicatedStorage:WaitForChild("UI"):WaitForChild("GunDealer")
+
+    if GunDealer then
+        GunDealer:FireServer("Purchase", "Drill")
+        task.wait(0.2) 
+        GunDealer:FireServer("Purchase", "Duffel")
+    end
+    task.wait(2)
+    if not IsAlive() then return false end
+
+    if GunDealer then GunDealer:FireServer("Exit") end
+    task.wait(0.5)
+    workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+        workspace.CurrentCamera.CameraSubject = LocalPlayer.Character.Humanoid
+    end
+    print("✅ Shop Complete.")
+    return true
+end
+
+-- Helper: Equip Tool
+local function EquipTool(name)
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    
+    if char and backpack then
+        if char:FindFirstChild(name) then return end
+        local tool = backpack:FindFirstChild(name)
+        if tool then
+            tool.Parent = char
+            print("Status: Equipped " .. name)
+        end
+    end
+end
+
+-- Helper: Fire ProximityPrompt
+local function FirePrompts()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    for _, v in pairs(workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") then
+            if v.Parent and v.Parent:IsA("BasePart") then
+                if (v.Parent.Position - root.Position).Magnitude < 15 then
+                    fireproximityprompt(v)
+                end
+            end
+        end
+    end
+end
+
+-- MAIN SEQUENCE
+local function StartRobbery()
+    task.spawn(function()
+        -- [FEATURE] Trigger Passive Mode ONCE at start (Outside the loop)
+        TogglePassiveMode()
+        task.wait(0.5)
+
+        while Config.Enabled do
+            print("Status: Loop Started...")
+            local failed = false
+
+            for _ = 1, 1 do
+                -- [STEP 0] SHOP
+                if not AutobuyforBank() then failed = true; break end
+
+                -- [STEP 1] First Door
+                if not SlideTo(Vector3.new(-225, 4, 94)) then failed = true; break end
+                task.wait(0.5); FirePrompts(); task.wait(1)
+                if not IsAlive() then failed = true; break end
+
+                -- [STEP 2] Vault Door
+                if not SlideTo(Vector3.new(-489, -255, -201)) then failed = true; break end
+                EquipTool("Drill")
+                task.wait(0.5); FirePrompts(); task.wait(1)
+                if not IsAlive() then failed = true; break end
+
+                -- [STEP 3] Safe Spot (Wait 15s)
+                if not SlideTo(Vector3.new(-491, -237, -219)) then failed = true; break end
+                print("Status: Waiting 15s for guards...")
+                for i = 1, 150 do 
+                    if not Config.Enabled then failed = true; break end 
+                    if not IsAlive() then failed = true; break end
+                    task.wait(0.1) 
+                end
+                if failed then break end
+
+                -- [STEP 4] Move to Gold Spot
+                if not SlideTo(Vector3.new(-489, -255, -222)) then failed = true; break end
+
+                -- [STEP 5] COLLECT GOLD
+                print("Status: Scanning for GoldBricks...")
+                local goldFolder = workspace:FindFirstChild("RobberyData") 
+                    and workspace.RobberyData:FindFirstChild("BankData") 
+                    and workspace.RobberyData.BankData:FindFirstChild("GoldBricks")
+
+                if goldFolder then
+                    local initialCount = #goldFolder:GetChildren()
+                    local collected = 0
+                    local timeout = 0
+                    print("Status: Found " .. initialCount .. " Bricks. Collecting 4...")
+
+                    while collected < 4 and #goldFolder:GetChildren() > 0 and Config.Enabled do
+                        if not IsAlive() then failed = true; break end
+                        FirePrompts()
+                        local currentCount = #goldFolder:GetChildren()
+                        collected = initialCount - currentCount
+                        timeout = timeout + 0.5
+                        if timeout > 30 then print("⚠️ Collection Timeout!"); break end
+                        task.wait(0.5)
+                    end
+                else
+                    print("❌ GoldBricks folder missing! Waiting 5s...")
+                    task.wait(5)
+                end
+                if failed then break end
+                print("✅ Collection Done!")
+
+                -- [STEP 6] Exit/Next Door
+                if not SlideTo(Vector3.new(-470, -255, -159)) then failed = true; break end
+                task.wait(0.5); FirePrompts()
+                if not IsAlive() then failed = true; break end
+
+                -- [STEP 7] Sell to NPC
+                local npc = workspace:FindFirstChild("RobbableNPC")
+                if npc and npc:FindFirstChild("HumanoidRootPart") then
+                    print("✅ NPC Found! Sliding to sell...")
+                    if not SlideTo(npc.HumanoidRootPart.Position) then failed = true; break end
+                    
+                    print("Status: Selling...")
+                    while npc.Parent and Config.Enabled do
+                        if not IsAlive() then failed = true; break end
+                        FirePrompts()
+                        task.wait(0.1)
+                    end
+                    print("✅ Sold successfully")
+                else
+                    print("❌ NPC NOT Found!")
+                end
+                if failed then break end
+            end 
+
+            -- DEATH HANDLING
+            if failed and not IsAlive() then
+                print("☠️ PLAYER DIED! Waiting for Respawn...")
+                LocalPlayer.CharacterAdded:Wait()
+                print("✅ Respawned! Skipping to AFK Spot...")
+                task.wait(2) -- Let character load
+                -- Note: Passive Mode is NOT triggered here anymore per request
+            elseif failed and not Config.Enabled then
+                print("🛑 Script Disabled.")
+                break
+            end
+
+            -- [STEP 8] AFK / COOLDOWN SPOT
+            if Config.Enabled then
+                print("Status: Moving to AFK Spot...")
+                if not SlideTo(Vector3.new(-209, 78, 312)) then task.wait(1) end
+
+                print("Status: Waiting 7 Minutes (Cooldown)...")
+                for i = 420, 1, -1 do
+                    if not Config.Enabled then return end
+                    if i % 60 == 0 then print("Status: " .. (i/60) .. " minutes remaining...") end
+                    task.wait(1)
+                end
+                print("Status: Cooldown finished. Restarting loop...")
+                task.wait(1)
+            end
+        end
+    end)
+end
+
+-- // 4. UI SYSTEM //
+
+local function SecureParent(gui)
+    local success = false
+    if gethui then gui.Parent = gethui(); success = true end
+    if not success then pcall(function() gui.Parent = CoreGui; success = true end) end
+    if not success or not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "GeminiBankStandalone_SinglePassive"
+ScreenGui.ResetOnSpawn = false
+SecureParent(ScreenGui)
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 300, 0, 150)
+MainFrame.Position = UDim2.new(0.5, -150, 0.5, -75)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.ClipsDescendants = true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner"); MainCorner.CornerRadius = UDim.new(0, 8); MainCorner.Parent = MainFrame
+local MainStroke = Instance.new("UIStroke"); MainStroke.Color = Color3.fromRGB(0, 150, 255); MainStroke.Thickness = 2; MainStroke.Parent = MainFrame
+
+local Dragging, DragInput, DragStart, StartPos
+MainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        Dragging = true; DragStart = input.Position; StartPos = MainFrame.Position
+    end
+end)
+MainFrame.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement then DragInput = input end end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == DragInput and Dragging then
+        local delta = input.Position - DragStart
+        MainFrame.Position = UDim2.new(StartPos.X.Scale, StartPos.X.Offset + delta.X, StartPos.Y.Scale, StartPos.Y.Offset + delta.Y)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then Dragging = false end end)
+
+local TitleBar = Instance.new("Frame"); TitleBar.Size = UDim2.new(1, 0, 0, 40); TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 40); TitleBar.Parent = MainFrame
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 8)
+local TitleLabel = Instance.new("TextLabel"); TitleLabel.Text = " Focus Bank Robbery "; TitleLabel.Size = UDim2.new(1, 0, 1, 0); TitleLabel.BackgroundTransparency = 1; TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255); TitleLabel.Font = Enum.Font.GothamBold; TitleLabel.TextSize = 16; TitleLabel.TextXAlignment = Enum.TextXAlignment.Left; TitleLabel.Parent = TitleBar
+
+local ToggleFrame = Instance.new("Frame"); ToggleFrame.Size = UDim2.new(1, -20, 0, 50); ToggleFrame.Position = UDim2.new(0, 10, 0, 60); ToggleFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 45); ToggleFrame.Parent = MainFrame
+Instance.new("UICorner", ToggleFrame).CornerRadius = UDim.new(0, 6)
+local StatusLabel = Instance.new("TextLabel"); StatusLabel.Text = "Status: OFF"; StatusLabel.Size = UDim2.new(1, -60, 1, 0); StatusLabel.Position = UDim2.new(0, 10, 0, 0); StatusLabel.BackgroundTransparency = 1; StatusLabel.TextColor3 = Color3.fromRGB(255, 255, 255); StatusLabel.Font = Enum.Font.GothamBold; StatusLabel.TextSize = 14; StatusLabel.TextXAlignment = Enum.TextXAlignment.Left; StatusLabel.Parent = ToggleFrame
+local Switch = Instance.new("TextButton"); Switch.Text = ""; Switch.Size = UDim2.new(0, 50, 0, 26); Switch.Position = UDim2.new(1, -60, 0.5, -13); Switch.BackgroundColor3 = Color3.fromRGB(60, 60, 65); Switch.Parent = ToggleFrame
+Instance.new("UICorner", Switch).CornerRadius = UDim.new(1, 0)
+local Dot = Instance.new("Frame"); Dot.Size = UDim2.new(0, 20, 0, 20); Dot.Position = UDim2.new(0, 3, 0.5, -10); Dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255); Dot.Parent = Switch; Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
+
+Switch.MouseButton1Click:Connect(function()
+    Config.Enabled = not Config.Enabled
+    local targetColor = Config.Enabled and Color3.fromRGB(0, 150, 255) or Color3.fromRGB(60, 60, 65)
+    local targetPos = Config.Enabled and UDim2.new(1, -23, 0.5, -10) or UDim2.new(0, 3, 0.5, -10)
+    TweenService:Create(Switch, TweenInfo.new(0.2), {BackgroundColor3 = targetColor}):Play()
+    TweenService:Create(Dot, TweenInfo.new(0.2), {Position = targetPos}):Play()
+    if Config.Enabled then
+        StatusLabel.Text = "Status: RUNNING"
+        StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+        StartRobbery()
+    else
+        StatusLabel.Text = "Status: OFF"
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input) if input.KeyCode == Enum.KeyCode.RightControl then ScreenGui.Enabled = not ScreenGui.Enabled end end)
+print("Focus Bank Robbery system Loaded have Fun credits too YNW")
