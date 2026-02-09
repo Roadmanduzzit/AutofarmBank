@@ -1,0 +1,190 @@
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
+-- // UI SCHUTZ //
+local function SecureParent(gui)
+    local success = false
+    pcall(function()
+        if gethui then gui.Parent = gethui(); success = true
+        elseif CoreGui then gui.Parent = CoreGui; success = true end
+    end)
+    if not success or not gui.Parent then
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then gui.Parent = pg else gui.Parent = LocalPlayer:WaitForChild("PlayerGui", 5) end
+    end
+end
+
+-- // UI SETUP //
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "InventoryViewer_Standalone"
+ScreenGui.ResetOnSpawn = false
+SecureParent(ScreenGui)
+
+-- Hauptfenster (Spielerliste)
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "PlayerList"
+MainFrame.Size = UDim2.new(0, 220, 0, 300)
+MainFrame.Position = UDim2.new(0.1, 0, 0.3, 0) -- Links auf dem Bildschirm
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel")
+Title.Text = "Spieler Liste"
+Title.Size = UDim2.new(1, 0, 0, 35)
+Title.BackgroundTransparency = 1
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 16
+Title.Parent = MainFrame
+
+local PlayerScroll = Instance.new("ScrollingFrame")
+PlayerScroll.Size = UDim2.new(1, -10, 1, -45)
+PlayerScroll.Position = UDim2.new(0, 5, 0, 40)
+PlayerScroll.BackgroundTransparency = 1
+PlayerScroll.ScrollBarThickness = 4
+PlayerScroll.Parent = MainFrame
+
+local PlayerLayout = Instance.new("UIListLayout")
+PlayerLayout.Parent = PlayerScroll
+PlayerLayout.Padding = UDim.new(0, 5)
+PlayerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Item Fenster (Rechts daneben)
+local ItemFrame = Instance.new("Frame")
+ItemFrame.Name = "ItemViewer"
+ItemFrame.Size = UDim2.new(0, 220, 0, 250)
+ItemFrame.Position = UDim2.new(1, 10, 0, 0) -- Rechts neben der Liste
+ItemFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+ItemFrame.Visible = false -- Erst unsichtbar
+ItemFrame.Parent = MainFrame
+Instance.new("UICorner", ItemFrame).CornerRadius = UDim.new(0, 8)
+
+local ItemTitle = Instance.new("TextLabel")
+ItemTitle.Text = "Inventar"
+ItemTitle.Size = UDim2.new(1, -30, 0, 30)
+ItemTitle.BackgroundTransparency = 1
+ItemTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+ItemTitle.Font = Enum.Font.GothamBold
+ItemTitle.TextSize = 14
+ItemTitle.Parent = ItemFrame
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Text = "X"
+CloseBtn.Size = UDim2.new(0, 25, 0, 25)
+CloseBtn.Position = UDim2.new(1, -30, 0, 5)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Parent = ItemFrame
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 4)
+
+local ItemScroll = Instance.new("ScrollingFrame")
+ItemScroll.Size = UDim2.new(1, -10, 1, -40)
+ItemScroll.Position = UDim2.new(0, 5, 0, 35)
+ItemScroll.BackgroundTransparency = 1
+ItemScroll.ScrollBarThickness = 4
+ItemScroll.Parent = ItemFrame
+
+local ItemLayout = Instance.new("UIListLayout")
+ItemLayout.Parent = ItemScroll
+ItemLayout.Padding = UDim.new(0, 2)
+
+-- // LOGIK //
+
+local function ShowInventory(targetPlayerName)
+    -- Liste leeren
+    for _, child in pairs(ItemScroll:GetChildren()) do
+        if child:IsA("TextLabel") then child:Destroy() end
+    end
+    
+    ItemFrame.Visible = true
+    ItemTitle.Text = "Inv: " .. targetPlayerName
+    
+    local targetPlayer = Players:FindFirstChild(targetPlayerName)
+    if not targetPlayer then return end
+    
+    local items = {}
+    
+    -- 1. Was hält er in der Hand? (Character)
+    if targetPlayer.Character then
+        local tool = targetPlayer.Character:FindFirstChildWhichIsA("Tool")
+        if tool then
+            table.insert(items, {Name = "★ " .. tool.Name, Color = Color3.fromRGB(0, 255, 100)}) -- Grün markiert
+        end
+    end
+    
+    -- 2. Was ist im Rucksack? (Backpack)
+    if targetPlayer:FindFirstChild("Backpack") then
+        for _, tool in pairs(targetPlayer.Backpack:GetChildren()) do
+            if tool:IsA("Tool") then
+                table.insert(items, {Name = "• " .. tool.Name, Color = Color3.fromRGB(200, 200, 200)})
+            end
+        end
+    end
+    
+    -- Items anzeigen
+    if #items == 0 then
+        local l = Instance.new("TextLabel")
+        l.Parent = ItemScroll
+        l.Size = UDim2.new(1, 0, 0, 25)
+        l.BackgroundTransparency = 1
+        l.Text = "(Leer)"
+        l.TextColor3 = Color3.fromRGB(100, 100, 100)
+        l.Font = Enum.Font.Gotham
+        l.TextSize = 12
+    else
+        for _, i in pairs(items) do
+            local l = Instance.new("TextLabel")
+            l.Parent = ItemScroll
+            l.Size = UDim2.new(1, 0, 0, 25)
+            l.BackgroundTransparency = 1
+            l.Text = i.Name
+            l.TextColor3 = i.Color
+            l.Font = Enum.Font.Gotham
+            l.TextSize = 13
+            l.TextXAlignment = Enum.TextXAlignment.Left
+        end
+    end
+    
+    ItemScroll.CanvasSize = UDim2.new(0, 0, 0, ItemLayout.AbsoluteContentSize.Y)
+end
+
+local function RefreshPlayerList()
+    -- Spielerliste leeren
+    for _, child in pairs(PlayerScroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    
+    -- Spieler hinzufügen
+    for _, plr in pairs(Players:GetPlayers()) do
+        local btn = Instance.new("TextButton")
+        btn.Parent = PlayerScroll
+        btn.Size = UDim2.new(1, 0, 0, 30)
+        btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+        btn.Text = plr.Name
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.GothamSemibold
+        btn.TextSize = 14
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        
+        btn.MouseButton1Click:Connect(function()
+            ShowInventory(plr.Name)
+        end)
+    end
+    
+    PlayerScroll.CanvasSize = UDim2.new(0, 0, 0, PlayerLayout.AbsoluteContentSize.Y)
+end
+
+-- Events
+CloseBtn.MouseButton1Click:Connect(function()
+    ItemFrame.Visible = false
+end)
+
+Players.PlayerAdded:Connect(RefreshPlayerList)
+Players.PlayerRemoving:Connect(RefreshPlayerList)
+RefreshPlayerList() -- Start
+
+print("🎒 Inventory Viewer Loaded!")
