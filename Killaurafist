@@ -93,7 +93,7 @@ end
 
 -- [[ 4. UI CONSTRUCTION ]] --
 local window = ui.newWindow({
-    text = 'FocusHub V29 (Lock Aura)',
+    text = 'Focus Killaura',
     resize = true,
     size = Vector2.new(500, 350)
 })
