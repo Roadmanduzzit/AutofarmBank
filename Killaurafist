@@ -1,70 +1,50 @@
 -- // ========================================== //
--- //    FOCUSRITE HUB V29 (MOUSE-LOCK AURA)     //
+-- //   DOLLARWARE FOCUS HUB V29 (MOUSE-LOCK)    //
 -- // ========================================== //
 
+-- [[ 1. DOLLARWARE LIBRARY SETUP ]] --
+local uiLoader = loadstring(game:HttpGet('https://raw.githubusercontent.com/topitbopit/dollarware/main/library.lua'))
+local ui = uiLoader({
+    rounding = true,
+    theme = 'midnight', 
+    smoothDragging = true
+})
+
+-- [[ 2. VARIABLES & SERVICES ]] --
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
-
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
+
+-- Remote Check
 local FistRemote = ReplicatedStorage:WaitForChild("Fist", 5)
+if not FistRemote then 
+    ui.notify({title = "Error", message = "Fist Remote not found!", duration = 5})
+    return 
+end
 
-if not FistRemote then warn("⚠️ 'Fist' Remote nicht gefunden!") return end
-
--- // KONFIGURATION //
+-- Config (Controlled by UI)
 local Config = {
-    LockKey = Enum.KeyCode.K,   -- Die Taste zum Anvisieren
-    
-    KillDist = 19,          -- Schlag-Reichweite
-    PushDist = 8,           -- Schubs-Reichweite
-    AutoPush = true,        -- Automatisch Schubsen
-    AutoEquip = true,       -- Automatisch Fäuste ausrüsten
-    FaceTarget = true,      -- Zum Gegner drehen
-    
-    Hooks = true            -- Anti-Slowdown
+    LockKey = Enum.KeyCode.K,   -- Default Key
+    KillDist = 19,
+    PushDist = 8,
+    AutoPush = true,
+    AutoEquip = true,
+    FaceTarget = true,
+    Hooks = true,
+    Enabled = true -- Master Switch
 }
 
--- // STATE //
+-- State
 local CurrentTarget = nil
-local CurrentHighlight = nil -- Für den visuellen Effekt
+local CurrentHighlight = nil
+local StatusLabel = nil -- Will be updated by UI
 
--- // UI SETUP (MINIMAL) //
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "Focus"
-if gethui then ScreenGui.Parent = gethui() else ScreenGui.Parent = CoreGui end
+-- [[ 3. HELPER FUNCTIONS ]] --
 
-local StatusFrame = Instance.new("Frame")
-StatusFrame.Size = UDim2.new(0, 200, 0, 70)
-StatusFrame.Position = UDim2.new(0.5, -100, 0.85, 0) -- Unten in der Mitte
-StatusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-StatusFrame.BorderSizePixel = 2
-StatusFrame.BorderColor3 = Color3.fromRGB(35, 35, 40)
-StatusFrame.Parent = ScreenGui
-
-local Title = Instance.new("TextLabel")
-Title.Text = "GetFisted [Key: K]"
-Title.Size = UDim2.new(1, 0, 0, 25)
-Title.BackgroundTransparency = 1
-Title.TextColor3 = Color3.fromRGB(50, 180, 255)
-Title.Font = Enum.Font.GothamBold
-Title.TextSize = 12
-Title.Parent = StatusFrame
-
-local TargetLabel = Instance.new("TextLabel")
-TargetLabel.Text = "Target"
-TargetLabel.Size = UDim2.new(1, 0, 0, 30)
-TargetLabel.Position = UDim2.new(0, 0, 0, 25)
-TargetLabel.BackgroundTransparency = 1
-TargetLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
-TargetLabel.Font = Enum.Font.GothamBlack
-TargetLabel.TextSize = 14
-TargetLabel.TextWrapped = true
-TargetLabel.Parent = StatusFrame
-
--- // 1. HOOKS (Anti-Slow) //
+-- Anti-Slow Hooks
 if Config.Hooks then
     local mt = getrawmetatable(game)
     local oldNewIndex = mt.__newindex
@@ -84,9 +64,8 @@ if Config.Hooks then
     setreadonly(mt, true)
 end
 
--- // 2. HELPER: HIGHLIGHT //
+-- Highlight System
 local function SetHighlight(targetChar)
-    -- Altes Highlight löschen
     if CurrentHighlight then CurrentHighlight:Destroy() CurrentHighlight = nil end
     
     if targetChar then
@@ -101,51 +80,98 @@ local function SetHighlight(targetChar)
     end
 end
 
--- // 3. INPUT LOGIC (DAS LOCK SYSTEM) //
+-- Update UI Status
+local function UpdateStatus(text)
+    if StatusLabel then
+        -- Dollarware doesn't support dynamic label updates easily, 
+        -- but we can use notifications for major changes or just console print
+        -- For a persistent status, we usually rely on the highlight.
+        -- We will use a notification if target changes.
+        -- ui.notify({title = "Target", message = text, duration = 1})
+    end
+end
+
+-- [[ 4. UI CONSTRUCTION ]] --
+local window = ui.newWindow({
+    text = 'FocusHub V29 (Lock Aura)',
+    resize = true,
+    size = Vector2.new(500, 350)
+})
+
+local menu = window:addMenu({ text = 'Main' })
+
+-- SECTION: SETTINGS
+local secSettings = menu:addSection({ text = 'Aura Settings', side = 'left' })
+
+secSettings:addToggle({ text = 'Master Switch', state = true }, function(v) Config.Enabled = v end)
+secSettings:addToggle({ text = 'Auto Push', state = true }, function(v) Config.AutoPush = v end)
+secSettings:addToggle({ text = 'Auto Equip Fist', state = true }, function(v) Config.AutoEquip = v end)
+secSettings:addToggle({ text = 'Face Target', state = true }, function(v) Config.FaceTarget = v end)
+
+secSettings:addSlider({ text = 'Hit Distance', min = 5, max = 25, val = 19, step = 1 }, function(v) Config.KillDist = v end)
+secSettings:addSlider({ text = 'Push Distance', min = 5, max = 15, val = 8, step = 1 }, function(v) Config.PushDist = v end)
+
+-- SECTION: CONTROLS
+local secControls = menu:addSection({ text = 'Controls', side = 'right' })
+
+secControls:addHotkey({ text = 'Lock Target Key' }, function(key) 
+    Config.LockKey = key 
+    ui.notify({title = "Keybind", message = "Lock Key set to: " .. tostring(key), duration = 2})
+end)
+-- Set Default Key manually in UI logic is tricky in Dollarware, usually requires binding manually.
+-- For now, the input listener uses Config.LockKey which defaults to K.
+
+secControls:addButton({ text = 'Reset Target' }, function()
+    CurrentTarget = nil
+    SetHighlight(nil)
+    ui.notify({title = "Target", message = "Target Reset", duration = 2})
+end)
+
+secControls:addLabel({ text = 'Hover mouse over player' })
+secControls:addLabel({ text = 'and press Key (K) to lock.' })
+
+
+-- [[ 5. LOGIC LOOPS ]] --
+
+-- INPUT LISTENER (LOCK SYSTEM)
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     
     if input.KeyCode == Config.LockKey then
-        -- Raycast von der Mausposition
+        -- Raycast from Mouse
         local mouseTarget = Mouse.Target
         
         if mouseTarget then
-            -- Suche nach einem Spieler im Ziel
             local character = mouseTarget:FindFirstAncestorOfClass("Model")
             if character then
                 local player = Players:GetPlayerFromCharacter(character)
                 
                 if player and player ~= LocalPlayer then
-                    -- NEUES ZIEL GEFUNDEN!
+                    -- NEW TARGET FOUND
                     CurrentTarget = player
-                    TargetLabel.Text = "ZIEL: " .. player.Name
-                    TargetLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
                     SetHighlight(character)
+                    ui.notify({title = "LOCKED", message = "Target: " .. player.Name, duration = 3})
                     return
                 end
             end
         end
         
-        -- Wenn wir ins Leere drücken -> Reset
+        -- Missed click -> Reset
         CurrentTarget = nil
-        TargetLabel.Text = "ZIEL: KEINES"
-        TargetLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
         SetHighlight(nil)
+        ui.notify({title = "UNLOCKED", message = "No Target", duration = 1})
     end
 end)
 
--- // 4. AURA LOOP //
+-- AURA LOOP
 task.spawn(function()
     while true do
-        if CurrentTarget then
-            -- Validierung: Lebt er noch?
+        if Config.Enabled and CurrentTarget then
+            -- Validation check
             if not CurrentTarget.Character or not CurrentTarget.Character:FindFirstChild("Humanoid") or CurrentTarget.Character.Humanoid.Health <= 0 then
-                -- Ziel ist tot -> Reset
-                TargetLabel.Text = "ZIEL ELIMINIERT"
-                TargetLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+                -- Target Dead/Gone
                 SetHighlight(nil)
                 CurrentTarget = nil
-                task.wait(1)
             elseif LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
                 
                 local myRoot = LocalPlayer.Character.HumanoidRootPart
@@ -154,7 +180,7 @@ task.spawn(function()
                 if tRoot then
                     local dist = (myRoot.Position - tRoot.Position).Magnitude
                     
-                    -- Update Highlight falls er respawned ist
+                    -- Update Highlight if respawned
                     if not CurrentHighlight or CurrentHighlight.Parent ~= CurrentTarget.Character then
                         SetHighlight(CurrentTarget.Character)
                     end
@@ -190,4 +216,4 @@ task.spawn(function()
     end
 end)
 
-print("Made By YNW Focus On Top")
+print("Dollarware FocusHub V29 Loaded.")
