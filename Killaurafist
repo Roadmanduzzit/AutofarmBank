@@ -1,0 +1,193 @@
+-- // ========================================== //
+-- //    FOCUSRITE HUB V29 (MOUSE-LOCK AURA)     //
+-- // ========================================== //
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+local FistRemote = ReplicatedStorage:WaitForChild("Fist", 5)
+
+if not FistRemote then warn("⚠️ 'Fist' Remote nicht gefunden!") return end
+
+-- // KONFIGURATION //
+local Config = {
+    LockKey = Enum.KeyCode.K,   -- Die Taste zum Anvisieren
+    
+    KillDist = 19,          -- Schlag-Reichweite
+    PushDist = 8,           -- Schubs-Reichweite
+    AutoPush = true,        -- Automatisch Schubsen
+    AutoEquip = true,       -- Automatisch Fäuste ausrüsten
+    FaceTarget = true,      -- Zum Gegner drehen
+    
+    Hooks = true            -- Anti-Slowdown
+}
+
+-- // STATE //
+local CurrentTarget = nil
+local CurrentHighlight = nil -- Für den visuellen Effekt
+
+-- // UI SETUP (MINIMAL) //
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "Focus"
+if gethui then ScreenGui.Parent = gethui() else ScreenGui.Parent = CoreGui end
+
+local StatusFrame = Instance.new("Frame")
+StatusFrame.Size = UDim2.new(0, 200, 0, 70)
+StatusFrame.Position = UDim2.new(0.5, -100, 0.85, 0) -- Unten in der Mitte
+StatusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+StatusFrame.BorderSizePixel = 2
+StatusFrame.BorderColor3 = Color3.fromRGB(35, 35, 40)
+StatusFrame.Parent = ScreenGui
+
+local Title = Instance.new("TextLabel")
+Title.Text = "GetFisted [Key: K]"
+Title.Size = UDim2.new(1, 0, 0, 25)
+Title.BackgroundTransparency = 1
+Title.TextColor3 = Color3.fromRGB(50, 180, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 12
+Title.Parent = StatusFrame
+
+local TargetLabel = Instance.new("TextLabel")
+TargetLabel.Text = "Target"
+TargetLabel.Size = UDim2.new(1, 0, 0, 30)
+TargetLabel.Position = UDim2.new(0, 0, 0, 25)
+TargetLabel.BackgroundTransparency = 1
+TargetLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+TargetLabel.Font = Enum.Font.GothamBlack
+TargetLabel.TextSize = 14
+TargetLabel.TextWrapped = true
+TargetLabel.Parent = StatusFrame
+
+-- // 1. HOOKS (Anti-Slow) //
+if Config.Hooks then
+    local mt = getrawmetatable(game)
+    local oldNewIndex = mt.__newindex
+    setreadonly(mt, false)
+
+    mt.__newindex = newcclosure(function(self, key, value)
+        if not checkcaller() then
+            if key == "WalkSpeed" and self:IsA("Humanoid") then
+                if value < 16 then return end 
+            end
+            if key == "Value" and self.Name == "Stamina" then
+                return oldNewIndex(self, key, 100)
+            end
+        end
+        return oldNewIndex(self, key, value)
+    end)
+    setreadonly(mt, true)
+end
+
+-- // 2. HELPER: HIGHLIGHT //
+local function SetHighlight(targetChar)
+    -- Altes Highlight löschen
+    if CurrentHighlight then CurrentHighlight:Destroy() CurrentHighlight = nil end
+    
+    if targetChar then
+        local hl = Instance.new("Highlight")
+        hl.Adornee = targetChar
+        hl.FillColor = Color3.fromRGB(255, 0, 0)
+        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+        hl.FillTransparency = 0.5
+        hl.OutlineTransparency = 0
+        hl.Parent = targetChar
+        CurrentHighlight = hl
+    end
+end
+
+-- // 3. INPUT LOGIC (DAS LOCK SYSTEM) //
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Config.LockKey then
+        -- Raycast von der Mausposition
+        local mouseTarget = Mouse.Target
+        
+        if mouseTarget then
+            -- Suche nach einem Spieler im Ziel
+            local character = mouseTarget:FindFirstAncestorOfClass("Model")
+            if character then
+                local player = Players:GetPlayerFromCharacter(character)
+                
+                if player and player ~= LocalPlayer then
+                    -- NEUES ZIEL GEFUNDEN!
+                    CurrentTarget = player
+                    TargetLabel.Text = "ZIEL: " .. player.Name
+                    TargetLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+                    SetHighlight(character)
+                    return
+                end
+            end
+        end
+        
+        -- Wenn wir ins Leere drücken -> Reset
+        CurrentTarget = nil
+        TargetLabel.Text = "ZIEL: KEINES"
+        TargetLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+        SetHighlight(nil)
+    end
+end)
+
+-- // 4. AURA LOOP //
+task.spawn(function()
+    while true do
+        if CurrentTarget then
+            -- Validierung: Lebt er noch?
+            if not CurrentTarget.Character or not CurrentTarget.Character:FindFirstChild("Humanoid") or CurrentTarget.Character.Humanoid.Health <= 0 then
+                -- Ziel ist tot -> Reset
+                TargetLabel.Text = "ZIEL ELIMINIERT"
+                TargetLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+                SetHighlight(nil)
+                CurrentTarget = nil
+                task.wait(1)
+            elseif LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                
+                local myRoot = LocalPlayer.Character.HumanoidRootPart
+                local tRoot = CurrentTarget.Character.HumanoidRootPart
+                
+                if tRoot then
+                    local dist = (myRoot.Position - tRoot.Position).Magnitude
+                    
+                    -- Update Highlight falls er respawned ist
+                    if not CurrentHighlight or CurrentHighlight.Parent ~= CurrentTarget.Character then
+                        SetHighlight(CurrentTarget.Character)
+                    end
+                    
+                    -- ATTACK LOGIC
+                    if dist <= Config.KillDist then
+                        -- Auto Equip
+                        if Config.AutoEquip and not LocalPlayer.Character:FindFirstChild("Fist") then
+                            local tool = LocalPlayer.Backpack:FindFirstChild("Fist")
+                            if tool then LocalPlayer.Character.Humanoid:EquipTool(tool) end
+                        end
+                        
+                        -- Face Target
+                        if Config.FaceTarget then
+                            myRoot.CFrame = CFrame.new(myRoot.Position, Vector3.new(tRoot.Position.X, myRoot.Position.Y, tRoot.Position.Z))
+                        end
+                        
+                        -- Push
+                        if Config.AutoPush and dist < Config.PushDist then
+                            FistRemote:FireServer("Push")
+                        end
+                        
+                        -- Hit
+                        if LocalPlayer.Character:FindFirstChild("Fist") then
+                            local anim = "Punch" .. math.random(1, 2)
+                            FistRemote:FireServer("SwingBegin", { anim })
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.1) -- Loop Speed
+    end
+end)
+
+print("Made By YNW Focus On Top")
