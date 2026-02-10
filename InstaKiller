@@ -1,0 +1,190 @@
+--[[
+    Mercenary Help: Shadow Elimination (Fixed Mag Dump)
+    - Fixes "One Shot" issue by spacing out remote calls
+    - Bypasses fire-rate limits by firing remotes directly
+--]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- // CONFIGURATION \\
+local ATTACH_OFFSET = CFrame.new(0, 0, 3) -- Distance behind victim
+local SHOTS_TO_FIRE = 10 -- How many times to shoot
+local FIRE_DELAY = 0.05 -- Seconds between shots (Fixes the "only shoots once" bug)
+
+-- // REMOTES \\
+local GunRemotes = ReplicatedStorage:WaitForChild("GunRemotes")
+local FireRemote = GunRemotes:WaitForChild("Fire")
+local ImpactRemote = GunRemotes:WaitForChild("Impact")
+
+-- // STATE \\
+local trackingConnection = nil
+local currentTarget = nil
+
+-- // CORE FUNCTIONS \\
+
+local function getWeapon()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local tool = char:FindFirstChildWhichIsA("Tool")
+    -- Verify it is a gun by checking for Stats [cite: 314]
+    if tool and tool:FindFirstChild("Stats") then
+        return tool
+    end
+    return nil
+end
+
+local function detach()
+    if trackingConnection then
+        trackingConnection:Disconnect()
+        trackingConnection = nil
+    end
+    currentTarget = nil
+end
+
+local function shadowStrike(targetPlayer)
+    detach() -- Reset any previous lock
+    
+    local myChar = LocalPlayer.Character
+    local targetChar = targetPlayer.Character
+    
+    if not myChar or not targetChar then return end
+    
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+    local targetHead = targetChar:FindFirstChild("Head")
+    
+    if not (myRoot and targetRoot and targetHead) then return end
+    
+    currentTarget = targetPlayer
+
+    -- 1. ATTACHMENT (Sticky Mode)
+    trackingConnection = RunService.RenderStepped:Connect(function()
+        if not targetPlayer.Parent or not targetRoot.Parent or not myRoot.Parent then
+            detach()
+            return
+        end
+        -- Lock behind player
+        local backPosition = targetRoot.CFrame * ATTACH_OFFSET
+        myRoot.CFrame = CFrame.lookAt(backPosition.Position, targetRoot.Position)
+        myRoot.Velocity = Vector3.new(0,0,0) -- Prevent physics flinging
+    end)
+    
+    -- 2. MAG DUMP SEQUENCE
+    task.spawn(function()
+        local weapon = getWeapon()
+        if weapon then
+            for i = 1, SHOTS_TO_FIRE do
+                -- Ensure we are still attached and weapon is valid
+                if not currentTarget or not weapon.Parent then break end
+                
+                -- A. Tell server we are firing 
+                FireRemote:FireServer()
+                
+                -- B. Tell server we hit the Head 
+                -- Arguments: HitPart, HitPosition, Direction, Normal, lastpenetrate, lastpenetratePos, lastpenetrateNormal
+                local hitPos = targetHead.Position
+                local direction = (targetHead.Position - myRoot.Position).Unit
+                
+                ImpactRemote:FireServer(
+                    targetHead,       -- v55 (Instance)
+                    hitPos,           -- v56 (Position)
+                    direction,        -- Direction vector
+                    Vector3.new(0,1,0), -- Normal
+                    false,            -- lastpenetrate (nil/false)
+                    nil,              -- lastpenetratePos
+                    nil               -- lastpenetrateNormal
+                )
+                
+                -- C. Tiny delay to allow server to process damage
+                task.wait(FIRE_DELAY)
+            end
+            print("Mag dump complete on: " .. targetPlayer.Name)
+        end
+        
+        -- 3. AUTO DETACH AFTER SHOOTING
+        detach()
+    end)
+end
+
+-- // GUI CONSTRUCTION \\
+
+local function createGui()
+    if PlayerGui:FindFirstChild("MercenaryShadowGUI") then
+        PlayerGui.MercenaryShadowGUI:Destroy()
+    end
+
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "MercenaryShadowGUI"
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.Parent = PlayerGui
+
+    local MainFrame = Instance.new("Frame")
+    MainFrame.Name = "MainFrame"
+    MainFrame.Size = UDim2.new(0, 220, 0, 350)
+    MainFrame.Position = UDim2.new(0.05, 0, 0.4, 0)
+    MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    MainFrame.BorderSizePixel = 0
+    MainFrame.Active = true
+    MainFrame.Draggable = true
+    MainFrame.Parent = ScreenGui
+
+    local UICorner = Instance.new("UICorner")
+    UICorner.CornerRadius = UDim.new(0, 6)
+    UICorner.Parent = MainFrame
+
+    local Title = Instance.new("TextLabel")
+    Title.Text = "Focus Insta Kill"
+    Title.Size = UDim2.new(1, 0, 0, 40)
+    Title.BackgroundColor3 = Color3.fromRGB(50, 180, 255)
+    Title.TextColor3 = Color3.new(1,1,1)
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 16
+    Title.Parent = MainFrame
+    Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 6)
+
+    local ScrollFrame = Instance.new("ScrollingFrame")
+    ScrollFrame.Size = UDim2.new(1, -10, 1, -50)
+    ScrollFrame.Position = UDim2.new(0, 5, 0, 45)
+    ScrollFrame.BackgroundTransparency = 1
+    ScrollFrame.ScrollBarThickness = 2
+    ScrollFrame.Parent = MainFrame
+
+    local UIListLayout = Instance.new("UIListLayout")
+    UIListLayout.Padding = UDim.new(0, 4)
+    UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    UIListLayout.Parent = ScrollFrame
+
+    local function updateList()
+        for _, child in pairs(ScrollFrame:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                local btn = Instance.new("TextButton")
+                btn.Size = UDim2.new(1, -10, 0, 35)
+                btn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+                btn.Text = player.Name
+                btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                btn.Font = Enum.Font.GothamSemibold
+                btn.TextSize = 14
+                btn.Parent = ScrollFrame
+                Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+                btn.MouseButton1Click:Connect(function()
+                    shadowStrike(player)
+                end)
+            end
+        end
+    end
+
+    updateList()
+    Players.PlayerAdded:Connect(updateList)
+    Players.PlayerRemoving:Connect(updateList)
+end
+
+createGui()
