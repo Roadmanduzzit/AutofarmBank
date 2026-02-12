@@ -1,0 +1,445 @@
+-- // ========================================== //
+-- //      Focus Premium Hub (FINAL V5.1) //
+-- // ========================================== //
+
+-- [[ 1. ADONIS BYPASS ]] --
+local g = getinfo or debug.getinfo
+local x, y
+setthreadidentity(2)
+for i, v in getgc(true) do
+    if typeof(v) == "table" then
+        local a = rawget(v, "Detected")
+        local b = rawget(v, "Kill")
+        if typeof(a) == "function" and not x then
+            x = a
+            hookfunction(x, function(c, f, n) return true end)
+        end
+        if rawget(v, "Variables") and rawget(v, "Process") and typeof(b) == "function" and not y then
+            y = b
+            hookfunction(y, function(f) end)
+        end
+    end
+end
+local o; o = hookfunction(getrenv().debug.info, newcclosure(function(...)
+    local a, f = ...
+    if x and a == x then return coroutine.yield(coroutine.running()) end
+    return o(...)
+end))
+setthreadidentity(7)
+
+-- [[ 2. SERVICES & VARIABLES ]] --
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- Global Config
+local Config = {
+    -- SILENT AIM CONFIG (NEW)
+    SilentAim = { 
+        Enabled = false, 
+        FOV = 200, 
+        ShowFOV = true, 
+        HitChance = 100, 
+        TargetPart = "Head", 
+        WallCheck = true, 
+        Visuals = true 
+    },
+    Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, MaxDist = 2500 },
+    Movement = { SlideEnabled = false, SlideSpeed = 45, FlyEnabled = false, FlySpeed = 45, Noclip = false },
+    Combat = { InfAmmo = false, RapidFire = false, NoRecoil = false },
+    Autofarm = { Enabled = false, Speed = 30 },
+    Misc = { InfStamina = false, CashPickup = false, PickupRange = 25 }
+}
+
+-- Logic Variables
+local ESP_Storage = {}
+local Movers = { SlideBV = nil, SlideBG = nil, FlyBV = nil, FlyBG = nil }
+local MoveKeys = {[Enum.KeyCode.W]=false, [Enum.KeyCode.A]=false, [Enum.KeyCode.S]=false, [Enum.KeyCode.D]=false}
+
+-- Silent Aim Visuals
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Color = Color3.fromRGB(255, 0, 80)
+FOVCircle.Thickness = 1.5
+FOVCircle.NumSides = 64
+FOVCircle.Filled = false
+FOVCircle.Visible = false
+
+local CurrentHighlight = nil
+local CurrentTarget = nil
+
+-- [[ 3. SILENT AIM FUNCTIONS (CAMERA HOOK) ]] --
+
+-- WallCheck
+local function IsVisible(part)
+    if not Config.SilentAim.WallCheck then return true end
+    local origin = Camera.CFrame.Position
+    local direction = (part.Position - origin).Unit * (part.Position - origin).Magnitude
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {LocalPlayer.Character, Camera, Workspace:FindFirstChild("OBJECTS"), Workspace:FindFirstChild("Ray_Ignore")}
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local result = Workspace:Raycast(origin, direction, params)
+    if result then
+        return result.Instance:IsDescendantOf(part.Parent)
+    end
+    return true
+end
+
+-- Highlight (Red Chams)
+local function UpdateHighlight(targetChar)
+    if CurrentHighlight then CurrentHighlight:Destroy(); CurrentHighlight = nil end
+    
+    if Config.SilentAim.Visuals and targetChar then
+        local hl = Instance.new("Highlight")
+        hl.Adornee = targetChar
+        hl.FillColor = Color3.fromRGB(255, 0, 0)
+        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+        hl.FillTransparency = 0.5
+        hl.OutlineTransparency = 0.5
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = targetChar
+        CurrentHighlight = hl
+    end
+end
+
+-- Get Target
+local function GetClosestTarget()
+    local MousePos = UserInputService:GetMouseLocation()
+    local ClosestDist = Config.SilentAim.FOV
+    local Target = nil
+    local Char = nil
+
+    if Config.SilentAim.Enabled then
+        for _, v in pairs(Players:GetPlayers()) do
+            if v ~= LocalPlayer and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+                local Part = v.Character:FindFirstChild(Config.SilentAim.TargetPart) or v.Character:FindFirstChild("Head")
+                
+                if Part then
+                    local ScreenPos, OnScreen = Camera:WorldToViewportPoint(Part.Position)
+                    if OnScreen then
+                        local Dist = (Vector2.new(ScreenPos.X, ScreenPos.Y) - MousePos).Magnitude
+                        if Dist < ClosestDist then
+                            if IsVisible(Part) then
+                                ClosestDist = Dist
+                                Target = Part
+                                Char = v.Character
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if Char ~= CurrentTarget then
+        CurrentTarget = Char
+        UpdateHighlight(Char)
+    end
+    
+    return Target
+end
+
+-- THE CAMERA HOOK
+local OldNamecall
+OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local Args = {...}
+    local Method = getnamecallmethod()
+
+    if Method == "ScreenPointToRay" and self == Camera and Config.SilentAim.Enabled then
+        if CurrentTarget and CurrentTarget:FindFirstChild(Config.SilentAim.TargetPart) then
+            local TargetPart = CurrentTarget[Config.SilentAim.TargetPart]
+            if math.random(1, 100) <= Config.SilentAim.HitChance then
+                local Direction = (TargetPart.Position - Camera.CFrame.Position).Unit
+                return Ray.new(Camera.CFrame.Position, Direction)
+            end
+        end
+    end
+
+    return OldNamecall(self, ...)
+end))
+
+-- [[ 4. MOVEMENT FUNCTIONS ]] --
+local function UpdateMovers(state, type)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    if type == "Slide" then
+        if state then
+            if not Movers.SlideBV then
+                Movers.SlideBV = Instance.new("BodyVelocity", root); Movers.SlideBV.MaxForce = Vector3.new(1e5,0,1e5)
+                Movers.SlideBG = Instance.new("BodyGyro", root); Movers.SlideBG.MaxTorque = Vector3.new(1e5,0,1e5); Movers.SlideBG.P=10000
+            end
+        else
+            if Movers.SlideBV then Movers.SlideBV:Destroy(); Movers.SlideBV = nil end
+            if Movers.SlideBG then Movers.SlideBG:Destroy(); Movers.SlideBG = nil end
+        end
+    elseif type == "Fly" then
+        if state then
+            if not Movers.FlyBV then
+                Movers.FlyBV = Instance.new("BodyVelocity", root); Movers.FlyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
+                Movers.FlyBG = Instance.new("BodyGyro", root); Movers.FlyBG.MaxTorque = Vector3.new(1e9,1e9,1e9); Movers.FlyBG.P=10000
+            end
+            char.Humanoid.PlatformStand = true
+        else
+            if Movers.FlyBV then Movers.FlyBV:Destroy(); Movers.FlyBV = nil end
+            if Movers.FlyBG then Movers.FlyBG:Destroy(); Movers.FlyBG = nil end
+            char.Humanoid.PlatformStand = false
+        end
+    end
+end
+
+-- [[ 5. ESP LOGIC ]] --
+local function CreateDrawing(t, p) local d = Drawing.new(t); for k,v in pairs(p) do d[k]=v end; return d end
+
+local function RemoveESP(plr)
+    if ESP_Storage[plr] then
+        for _, d in pairs(ESP_Storage[plr]) do if d.Remove then d:Remove() end end
+        ESP_Storage[plr] = nil
+    end
+end
+
+local function HandleESP()
+    if not Config.Visuals.Enabled then 
+        for _, p in pairs(ESP_Storage) do for _, d in pairs(p) do d.Visible = false end end
+        return 
+    end
+
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            if not ESP_Storage[plr] then
+                ESP_Storage[plr] = {
+                    Box = CreateDrawing("Square", {Thickness=1, Color=Color3.new(1,1,1), Filled=false}),
+                    Name = CreateDrawing("Text", {Size=13, Center=true, Outline=true, Color=Color3.new(1,1,1)}),
+                    Bar = CreateDrawing("Square", {Filled=true}),
+                    Tool = CreateDrawing("Text", {Size=12, Center=true, Outline=true, Color=Color3.new(0.8,0.8,1)})
+                }
+            end
+
+            local d = ESP_Storage[plr]
+            local char = plr.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChild("Humanoid")
+            local show = false
+
+            if root and hum and hum.Health > 0 then
+                local pos, vis = Camera:WorldToViewportPoint(root.Position)
+                if vis and (root.Position - Camera.CFrame.Position).Magnitude <= Config.Visuals.MaxDist then
+                    show = true
+                    local h = 1000/pos.Z * 3.5; local w = h/2; local x = pos.X - w/2; local y = pos.Y - h/2
+                    
+                    if Config.Visuals.Box then d.Box.Visible=true; d.Box.Size=Vector2.new(w,h); d.Box.Position=Vector2.new(x,y) else d.Box.Visible=false end
+                    if Config.Visuals.Name then d.Name.Visible=true; d.Name.Text=plr.Name; d.Name.Position=Vector2.new(x+w/2, y-16) else d.Name.Visible=false end
+                    if Config.Visuals.Health then
+                        local hp = math.clamp(hum.Health/hum.MaxHealth, 0, 1)
+                        d.Bar.Visible=true; d.Bar.Size=Vector2.new(2, h*hp); d.Bar.Position=Vector2.new(x-5, y+h-(h*hp)); d.Bar.Color=Color3.fromHSV(hp*0.3,1,1)
+                    else d.Bar.Visible=false end
+                    
+                    if Config.Visuals.Tool then
+                        local tool = char:FindFirstChildWhichIsA("Tool")
+                        if tool then d.Tool.Visible = true; d.Tool.Text = tool.Name; d.Tool.Position = Vector2.new(x + w/2, y + h + 2) else d.Tool.Visible = false end
+                    else d.Tool.Visible = false end
+                end
+            end
+            if not show then for _, o in pairs(d) do o.Visible = false end end
+        end
+    end
+end
+
+Players.PlayerRemoving:Connect(RemoveESP)
+
+-- [[ 6. UI SETUP (DOLLARWARE) ]] --
+local uiLoader = loadstring(game:HttpGet('https://raw.githubusercontent.com/topitbopit/dollarware/main/library.lua'))
+local ui = uiLoader({ rounding = true, theme = 'midnight', smoothDragging = true })
+local window = ui.newWindow({ text = ' Focus ', resize = true, size = Vector2.new(600, 450) })
+
+-- > TAB 1: SILENT AIM (REPLACED COMBAT)
+local menuCombat = window:addMenu({ text = 'Silent Aim' })
+local sectSilent = menuCombat:addSection({ text = 'Main Settings', side = 'left' })
+
+sectSilent:addToggle({ text = 'Enabled', state = false }, function(v) Config.SilentAim.Enabled = v end)
+sectSilent:addToggle({ text = 'Show FOV Circle', state = false }, function(v) Config.SilentAim.ShowFOV = v; FOVCircle.Visible = v end)
+sectSilent:addToggle({ text = 'Red Target Chams', state = false }, function(v) 
+    Config.SilentAim.Visuals = v 
+    if not v and CurrentHighlight then CurrentHighlight:Destroy(); CurrentHighlight = nil end
+end)
+sectSilent:addSlider({ text = 'FOV Radius', min = 10, max = 500, val = 200 }, function(v) Config.SilentAim.FOV = v; FOVCircle.Radius = v end)
+
+local sectSilentExtra = menuCombat:addSection({ text = 'Extra', side = 'right' })
+sectSilentExtra:addToggle({ text = 'Wall Check', state = true }, function(v) Config.SilentAim.WallCheck = v end)
+sectSilentExtra:addSlider({ text = 'Hit Chance %', min = 0, max = 100, val = 100 }, function(v) Config.SilentAim.HitChance = v end)
+
+-- > TAB 2: GUN MODS
+local sectGun = menuCombat:addSection({ text = 'Weapon Mods', side = 'auto' })
+sectGun:addToggle({ text = 'Infinite Ammo', state = false }, function(v) Config.Combat.InfAmmo = v end)
+sectGun:addToggle({ text = 'Rapid Fire', state = false }, function(v) Config.Combat.RapidFire = v end)
+sectGun:addToggle({ text = 'No Recoil', state = false }, function(v) Config.Combat.NoRecoil = v end)
+sectGun:addButton({ text = 'Load Killaura' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/Killaurafist"))() end)
+-- [[ INSTAKILLER RESTORED ]] --
+sectGun:addButton({ text = 'Load Instakiller' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/main/InstaKiller"))() end)
+
+-- > TAB 3: VISUALS (ESP)
+local menuVis = window:addMenu({ text = 'ESP' })
+local sectESP = menuVis:addSection({ text = 'ESP Settings', side = 'auto' })
+sectESP:addToggle({ text = 'Master Switch', state = false }, function(v) 
+    Config.Visuals.Enabled = v 
+    if not v then for _, p in pairs(ESP_Storage) do for _, d in pairs(p) do d.Visible = false end end end
+end)
+sectESP:addToggle({ text = 'Boxes', state = false }, function(v) Config.Visuals.Box = v end)
+sectESP:addToggle({ text = 'Names', state = false }, function(v) Config.Visuals.Name = v end)
+sectESP:addToggle({ text = 'Health Bar', state = false }, function(v) Config.Visuals.Health = v end)
+sectESP:addToggle({ text = 'Held Weapon', state = false }, function(v) Config.Visuals.Tool = v end)
+sectESP:addSlider({ text = 'Render Distance', min = 100, max = 5000, val = 2500 }, function(v) Config.Visuals.MaxDist = v end)
+
+-- > TAB 4: MOVEMENT
+local menuMove = window:addMenu({ text = 'Movement' })
+local sectMainMove = menuMove:addSection({ text = 'Main', side = 'left' })
+sectMainMove:addToggle({ text = 'Speed / Slide', state = false }, function(v) Config.Movement.SlideEnabled = v; UpdateMovers(v, "Slide") end)
+sectMainMove:addSlider({ text = 'Slide Speed', min = 16, max = 45, val = 45 }, function(v) Config.Movement.SlideSpeed = v end)
+sectMainMove:addToggle({ text = 'Fly', state = false }, function(v) Config.Movement.FlyEnabled = v; UpdateMovers(v, "Fly") end)
+sectMainMove:addSlider({ text = 'Fly Speed', min = 16, max = 45, val = 45 }, function(v) Config.Movement.FlySpeed = v end)
+
+local sectExtraMove = menuMove:addSection({ text = 'Extra', side = 'right' })
+sectExtraMove:addToggle({ text = 'Noclip', state = false }, function(v) 
+    Config.Movement.Noclip = v
+    if v then 
+        NoclipConnection = RunService.Stepped:Connect(function() 
+            if LocalPlayer.Character then for _,p in pairs(LocalPlayer.Character:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide = false end end end 
+        end) 
+    else if NoclipConnection then NoclipConnection:Disconnect() end end 
+end)
+sectExtraMove:addToggle({ text = 'Infinite Stamina', state = false }, function(v) Config.Misc.InfStamina = v end)
+
+-- > TAB 5: FARM & UTILS
+local menuMisc = window:addMenu({ text = 'Farm & Utils' })
+local sectFarm = menuMisc:addSection({ text = 'Autofarm', side = 'left' })
+sectFarm:addSlider({ text = 'Farm Speed', min = 10, max = 30, val = 30 }, function(v) Config.Autofarm.Speed = v end)
+sectFarm:addToggle({ text = 'Spill Autofarm', state = false }, function(v) 
+    Config.Autofarm.Enabled = v
+    if v then
+        task.spawn(function()
+            local spillSys = Workspace:FindFirstChild("SpillSystem")
+            while Config.Autofarm.Enabled and spillSys do
+                for _, spill in pairs(spillSys:GetChildren()) do
+                    if not Config.Autofarm.Enabled then break end
+                    local target = (spill:IsA("Model") and spill.PrimaryPart) or (spill:IsA("BasePart") and spill)
+                    local decal = spill:FindFirstChildWhichIsA("Decal", true)
+                    if target and decal and decal.Transparency < 0.1 then
+                        local char = LocalPlayer.Character
+                        if char and char:FindFirstChild("HumanoidRootPart") then
+                            local root = char.HumanoidRootPart
+                            local dist = (root.Position - target.Position).Magnitude
+                            local time = dist / Config.Autofarm.Speed
+                            local t = TweenService:Create(root, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = CFrame.new(target.Position + Vector3.new(0,3,0))})
+                            t:Play()
+                            local elapsed = 0
+                            while elapsed < time do if not Config.Autofarm.Enabled then t:Cancel(); return end; task.wait(0.1); elapsed = elapsed + 0.1 end
+                            if Config.Autofarm.Enabled then
+                                local prompt = spill:FindFirstChildWhichIsA("ProximityPrompt", true)
+                                if prompt then fireproximityprompt(prompt) end
+                            end
+                            task.wait(2)
+                        end
+                    end
+                end
+                task.wait(1)
+            end
+        end)
+    end
+end)
+sectFarm:addButton({ text = 'Load Bank Farm' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/Auto"))() end)
+
+local sectUtil = menuMisc:addSection({ text = 'Utility', side = 'right' })
+sectUtil:addToggle({ text = 'Cash Magnet', state = false }, function(v) Config.Misc.CashPickup = v end)
+sectUtil:addButton({ text = 'Inventory Viewer' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/inventoryviewer"))() end)
+
+-- [[ 7. MAIN LOOPS ]] --
+RunService.RenderStepped:Connect(function()
+    -- Silent Aim Logic (Visuals)
+    FOVCircle.Position = UserInputService:GetMouseLocation()
+    FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
+    
+    if Config.SilentAim.Enabled then
+        GetClosestTarget() -- Updates Target & Chams
+    else
+        UpdateHighlight(nil)
+    end
+
+    -- ESP & Movement
+    HandleESP()
+    
+    local camCF = Camera.CFrame
+    local look, right = camCF.LookVector, camCF.RightVector
+    local moveDir = Vector3.zero
+    if MoveKeys[Enum.KeyCode.W] then moveDir = moveDir + look end
+    if MoveKeys[Enum.KeyCode.S] then moveDir = moveDir - look end
+    if MoveKeys[Enum.KeyCode.A] then moveDir = moveDir - right end
+    if MoveKeys[Enum.KeyCode.D] then moveDir = moveDir + right end
+
+    if Config.Movement.FlyEnabled and Movers.FlyBV then
+        if moveDir.Magnitude > 0 then
+            Movers.FlyBV.Velocity = moveDir.Unit * Config.Movement.FlySpeed
+            Movers.FlyBG.CFrame = CFrame.lookAt(Movers.FlyBV.Parent.Position, Movers.FlyBV.Parent.Position + moveDir)
+        else Movers.FlyBV.Velocity = Vector3.zero; Movers.FlyBG.CFrame = camCF end
+    end
+    if Config.Movement.SlideEnabled and Movers.SlideBV then
+        local flatLook = Vector3.new(look.X, 0, look.Z).Unit
+        local flatRight = Vector3.new(right.X, 0, right.Z).Unit
+        local flatDir = Vector3.zero
+        if MoveKeys[Enum.KeyCode.W] then flatDir = flatDir + flatLook end
+        if MoveKeys[Enum.KeyCode.S] then flatDir = flatDir - flatLook end
+        if MoveKeys[Enum.KeyCode.A] then flatDir = flatDir - flatRight end
+        if MoveKeys[Enum.KeyCode.D] then flatDir = flatDir + flatRight end
+        
+        if flatDir.Magnitude > 0 then
+            Movers.SlideBV.Velocity = flatDir.Unit * Config.Movement.SlideSpeed
+            Movers.SlideBG.CFrame = CFrame.lookAt(Movers.SlideBV.Parent.Position, Movers.SlideBV.Parent.Position + flatDir)
+        else Movers.SlideBV.Velocity = Vector3.zero end
+    end
+
+    -- Gun Mods
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildWhichIsA("Tool")
+    if tool and tool:FindFirstChild("Stats") then
+        if Config.Combat.RapidFire then tool.Stats.FireRate.Value = 0; tool.Stats.GunType.Value = "Auto" end
+        if Config.Combat.NoRecoil then tool.Stats.Recoil.Value = 0 end
+        if Config.Combat.InfAmmo and tool.Stats.ClipSize.Value <= 0 then
+            game.ReplicatedStorage.GunRemotes.Reload:FireServer(tool, true)
+            tool.Stats.ClipSize.Value = tool.Stats.MaxAmmo.Value
+        end
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if Config.Misc.CashPickup then
+        local char = LocalPlayer.Character; local root = char and char:FindFirstChild("HumanoidRootPart")
+        local folder = Workspace:FindFirstChild("OBJECTS")
+        if root and folder then
+            for _, item in pairs(folder:GetChildren()) do
+                if item.Name == "CashHandle" and (item.Position - root.Position).Magnitude <= Config.Misc.PickupRange then
+                    local p = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if p and p.Enabled then p.HoldDuration = 0; fireproximityprompt(p) end
+                end
+            end
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(i, g)
+    if not g and MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode] = true end
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode] = false end
+end)
+
+local oldIdx; oldIdx = hookmetamethod(game, "__newindex", function(t, k, v)
+    if Config.Misc.InfStamina and t.Name == "Stamina" and k == "Value" then return oldIdx(t, k, 100) end
+    return oldIdx(t, k, v)
+end)
+
+print("Focus Loaded! Credits too YNW")
