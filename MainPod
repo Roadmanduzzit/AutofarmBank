@@ -1,0 +1,393 @@
+-- ==============================================================================
+-- 🎣 ULTIMATE FISHING MASTER-HUB (DOLLARWARE EDITION V3.1 - ESP FIX)
+-- ==============================================================================
+
+-- Services
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- ==============================================================================
+-- ⚙️ GLOBAL CONFIGURATION & STATE
+-- ==============================================================================
+local State = {
+    AutoMinigame = false,
+    AutoHarvest = false,
+    AutoHarvestInterval = 1,
+    ESP = false,
+    
+    AutoSell = false,
+    SellInterval = 15,
+    
+    AutoBuy = false,
+    BuySpeed = 1,
+    BuyFishes = {}, 
+    
+    AutoPlace = false,
+    PlaceSpeed = 1,
+    PlaceFishes = {} 
+}
+
+local Config = {
+    AvailableFishes = {
+        "Sardine", "Anchovy", "Eel", "Bass", "Tilapia", "Catfish", "Stubby", 
+        "Salmon", "Shrimp", "Goldfish", "Blue Tang", "Clownfish", "Koi", 
+        "Swordfish", "Angel Squid", "Lionfish", "Blob Fish", "Hammerhead Shark", 
+        "Sea Turtle", "Manatee", "Megalodon", "Squid", "Bloop"
+    },
+    NetworkPath = "ffrostflame_bridgenet2@1.0.0",
+    RemoteName = "dataRemoteEvent",
+    OpCodes = {
+        OpenSell = { [2] = "\016", [3] = "Sell", [4] = "(" },
+        SellAll = { "All", "\b" },
+        BuyOp = ")",
+        PlaceOp = "\014"
+    },
+    ESPColors = {
+        Egg = Color3.fromRGB(255, 200, 50),
+        Fish = Color3.fromRGB(50, 255, 150),
+        Mutation = Color3.fromRGB(200, 100, 255),
+        Background = Color3.fromRGB(20, 20, 20)
+    }
+}
+
+local function GetRemote()
+    local folder = ReplicatedStorage:FindFirstChild(Config.NetworkPath)
+    if folder then return folder:FindFirstChild(Config.RemoteName) end
+    return nil
+end
+
+-- ==============================================================================
+-- 🎨 UI SETUP WITH DOLLARWARE
+-- ==============================================================================
+local uiLoader = loadstring(game:HttpGet('https://raw.githubusercontent.com/topitbopit/dollarware/main/library.lua'))
+local ui = uiLoader({ rounding = true, theme = 'blueberry', smoothDragging = true })
+ui.autoDisableToggles = true
+
+local window = ui.newWindow({ text = 'Focus', resize = true, size = Vector2.new(600, 450) })
+
+-- TAB 1: FARMING & ESP
+local farmMenu = window:addMenu({ text = 'Farming & ESP' })
+local actionSection = farmMenu:addSection({ text = 'Actions', side = 'left' })
+actionSection:addToggle({ text = 'Auto-Win Minigame', state = false }, function(v) State.AutoMinigame = v end)
+actionSection:addToggle({ text = 'Auto-Harvest', state = false }, function(v) State.AutoHarvest = v end)
+actionSection:addSlider({ text = 'Harvest Interval', min = 0.5, max = 5, step = 0.5, val = 1 }, function(v) State.AutoHarvestInterval = v end)
+
+local espSection = farmMenu:addSection({ text = 'Visuals', side = 'right' })
+espSection:addToggle({ text = 'Fish ESP', state = false }, function(v)
+    State.ESP = v
+    if v then ui.notify({title = 'ESP', message = 'Esp loaded Thanks For using focus', duration = 2}) end
+end):setTooltip("Displays accurate fish mutations, weight, and egg progress.")
+
+-- TAB 2: ECONOMY
+local econMenu = window:addMenu({ text = 'Economy' })
+local sellSection = econMenu:addSection({ text = 'Auto-Sell', side = 'auto' })
+sellSection:addToggle({ text = 'Enable Auto-Sell', state = false }, function(v) State.AutoSell = v end)
+sellSection:addSlider({ text = 'Interval (Seconds)', min = 5, max = 60, step = 1, val = 15 }, function(v) State.SellInterval = v end)
+
+-- TAB 3: AUTO-BUY
+local buyMenu = window:addMenu({ text = 'Auto-Buy' })
+local buyControlSec = buyMenu:addSection({ text = 'Controls', side = 'left' })
+buyControlSec:addToggle({ text = 'Auto-Buy', state = false }, function(v) State.AutoBuy = v end)
+buyControlSec:addSlider({ text = 'Speed (Buys/Frame)', min = 1, max = 20, step = 1, val = 1 }, function(v) State.BuySpeed = v end)
+buyControlSec:addButton({ text = 'Select All', style = 'small' }, function()
+    for _, f in ipairs(Config.AvailableFishes) do State.BuyFishes[f] = true end
+end)
+buyControlSec:addButton({ text = 'Deselect All', style = 'small' }, function() State.BuyFishes = {} end)
+
+local buyListSec = buyMenu:addSection({ text = 'Selection', side = 'right' })
+for _, fishName in ipairs(Config.AvailableFishes) do
+    buyListSec:addToggle({ text = fishName, state = false }, function(v) State.BuyFishes[fishName] = v end)
+end
+
+-- TAB 4: AUTO-PLACE
+local placeMenu = window:addMenu({ text = 'Auto-Place' })
+local placeControlSec = placeMenu:addSection({ text = 'Controls', side = 'left' })
+placeControlSec:addToggle({ text = 'Enable Auto-Place', state = false }, function(v) State.AutoPlace = v end)
+placeControlSec:addSlider({ text = 'Speed (Spawns/Frame)', min = 1, max = 20, step = 1, val = 1 }, function(v) State.PlaceSpeed = v end)
+placeControlSec:addButton({ text = 'Select All', style = 'small' }, function()
+    for _, f in ipairs(Config.AvailableFishes) do State.PlaceFishes[f] = true end
+end)
+placeControlSec:addButton({ text = 'Deselect All', style = 'small' }, function() State.PlaceFishes = {} end)
+
+local placeListSec = placeMenu:addSection({ text = 'Selection', side = 'right' })
+for _, fishName in ipairs(Config.AvailableFishes) do
+    placeListSec:addToggle({ text = fishName, state = false }, function(v) State.PlaceFishes[fishName] = v end)
+end
+
+-- ==============================================================================
+-- 👁️ ESP SYSTEM (Hybrid UI-Scraper & Tag System)
+-- ==============================================================================
+local FishESP = { Tracked = {}, Connections = {} }
+
+function FishESP:GetMutators(instance, fishUI)
+    local mutators = {}
+    local found = {}
+
+    -- Method 1: Scrape from the game's actual hidden UI (Most reliable for dynamic updates)
+    if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("Mutations") then
+        for _, child in ipairs(fishUI.Holder.Mutations:GetChildren()) do
+            if child:IsA("TextLabel") and child.Visible and child.Name ~= "MutationNameTemplate" and child.Name ~= "PlusTemplate" then
+                if not found[child.Name] then
+                    table.insert(mutators, child.Name)
+                    found[child.Name] = true
+                end
+            end
+        end
+    end
+
+    -- Method 2: Fallback to CollectionService tags
+    for _, tag in ipairs(CollectionService:GetTags(instance)) do
+        if string.find(tag, "Mutator$") then
+            local m = string.gsub(tag, "Mutator", "")
+            if not found[m] then
+                table.insert(mutators, m)
+                found[m] = true
+            end
+        end
+    end
+
+    return mutators
+end
+
+function FishESP:CreateNode(instance, isEgg)
+    if not instance.PrimaryPart then return nil end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "FishESP_Node"
+    billboard.Adornee = instance.PrimaryPart
+    billboard.Size = UDim2.new(0, 150, 0, 80)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    
+    pcall(function() billboard.Parent = CoreGui end)
+    if not billboard.Parent then billboard.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+    local frame = Instance.new("Frame", billboard)
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 0.5
+    frame.BackgroundColor3 = Config.ESPColors.Background
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+
+    local label = Instance.new("TextLabel", frame)
+    label.Size = UDim2.new(1, -10, 1, -10)
+    label.Position = UDim2.new(0, 5, 0, 5)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.Code
+    label.TextSize = 14
+    label.TextColor3 = isEgg and Config.ESPColors.Egg or Config.ESPColors.Fish
+    label.TextWrapped = true
+    label.RichText = true
+    label.TextYAlignment = Enum.TextYAlignment.Top
+
+    return billboard, label
+end
+
+function FishESP:UpdateNode(data)
+    if not data.Instance or not data.Instance.Parent or not data.Instance.PrimaryPart then return end
+
+    local text = ""
+    local fishUI = data.Instance.PrimaryPart:FindFirstChild("FishInfoUI")
+
+    if data.IsEgg then
+        local progress = "Waiting..."
+        -- Scrape live egg percentage
+        if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("Progress") then
+            progress = fishUI.Holder.Progress.Text
+        end
+        text = "<b>[Egg]</b>\nProgress: " .. progress
+    else
+        local fishId = data.Instance:GetAttribute("FishId") or "Unknown"
+        local weight = data.Instance:GetAttribute("Weight") or 0
+        
+        -- Override generic ID with exact display name from UI
+        if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("FishName") then
+            fishId = fishUI.Holder.FishName.Text
+        end
+        
+        text = string.format("<b>%s</b>\nWeight: %.2f kg", tostring(fishId), typeof(weight) == "number" and weight or 0)
+    end
+
+    local mutators = self:GetMutators(data.Instance, fishUI)
+    if #mutators > 0 then
+        local hex = string.format("#%02X%02X%02X", Config.ESPColors.Mutation.R*255, Config.ESPColors.Mutation.G*255, Config.ESPColors.Mutation.B*255)
+        text = text .. string.format("\n<font color=\"%s\">[%s]</font>", hex, table.concat(mutators, " | "))
+    end
+    
+    data.Label.Text = text
+end
+
+function FishESP:Add(instance, isEgg)
+    if self.Tracked[instance] then return end
+    
+    task.spawn(function()
+        if not instance.PrimaryPart then
+            instance:GetPropertyChangedSignal("PrimaryPart"):Wait()
+        end
+        
+        if not instance or not instance.Parent then return end
+
+        local billboard, label = self:CreateNode(instance, isEgg)
+        if billboard then
+            self.Tracked[instance] = {
+                Instance = instance,
+                Billboard = billboard,
+                Label = label,
+                IsEgg = isEgg
+            }
+            self:UpdateNode(self.Tracked[instance])
+        end
+    end)
+end
+
+function FishESP:Remove(instance)
+    local data = self.Tracked[instance]
+    if data then
+        if data.Billboard then data.Billboard:Destroy() end
+        self.Tracked[instance] = nil
+    end
+end
+
+function FishESP:Init()
+    for _, inst in ipairs(CollectionService:GetTagged("SpawnedEgg")) do self:Add(inst, true) end
+    for _, inst in ipairs(CollectionService:GetTagged("Fish")) do self:Add(inst, false) end
+
+    table.insert(self.Connections, CollectionService:GetInstanceAddedSignal("SpawnedEgg"):Connect(function(i) self:Add(i, true) end))
+    table.insert(self.Connections, CollectionService:GetInstanceAddedSignal("Fish"):Connect(function(i) self:Add(i, false) end))
+    
+    table.insert(self.Connections, CollectionService:GetInstanceRemovedSignal("SpawnedEgg"):Connect(function(i) self:Remove(i) end))
+    table.insert(self.Connections, CollectionService:GetInstanceRemovedSignal("Fish"):Connect(function(i) self:Remove(i) end))
+
+    local updateCounter = 0
+    table.insert(self.Connections, RunService.RenderStepped:Connect(function()
+        local camPos = Camera.CFrame.Position
+        updateCounter = updateCounter + 1
+        local shouldUpdateData = (updateCounter % 30 == 0) -- Force data refresh every ~0.5 seconds
+
+        for inst, data in pairs(self.Tracked) do
+            if inst and inst.PrimaryPart then
+                local isValidParent = inst.Parent == Workspace:FindFirstChild("Fish") or inst.Parent == ReplicatedStorage:FindFirstChild("TempFishFolder")
+                
+                if State.ESP and isValidParent then
+                    local dist = (inst.PrimaryPart.Position - camPos).Magnitude
+                    data.Billboard.Enabled = dist <= 200
+                    
+                    if shouldUpdateData then 
+                        self:UpdateNode(data) 
+                    end
+                else
+                    data.Billboard.Enabled = false
+                end
+            else
+                self:Remove(inst)
+            end
+        end
+    end))
+end
+
+FishESP:Init()
+
+-- ==============================================================================
+-- 🧠 BACKGROUND LOGIC (Engines)
+-- ==============================================================================
+RunService.RenderStepped:Connect(function()
+    if not State.AutoMinigame then return end
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return end
+    
+    local minigameUI = playerGui:FindFirstChild("HitTheZoneCircleUI")
+    if minigameUI and minigameUI:FindFirstChild("Holder") and minigameUI.Holder.Visible then
+        local main = minigameUI.Holder:FindFirstChild("Main")
+        if main and main:FindFirstChild("Target") and main:FindFirstChild("Arrow") then
+            local arrowRot = main.Arrow.Rotation % 360
+            local targetRot = main.Target.Rotation % 360
+            local diff = math.abs(arrowRot - targetRot)
+            
+            if diff <= 25 or (360 - diff) <= 25 then
+                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+                task.wait(0.1)
+            end
+        end
+    end
+end)
+
+local lastHarvest = 0
+RunService.Heartbeat:Connect(function()
+    if not State.AutoHarvest then return end
+    local now = os.clock()
+    if now - lastHarvest >= State.AutoHarvestInterval then
+        lastHarvest = now
+        local fishFolder = Workspace:FindFirstChild("Fish")
+        if fishFolder then
+            for _, obj in ipairs(fishFolder:GetDescendants()) do
+                if obj:IsA("ProximityPrompt") and obj.ActionText == "Collect" and obj.Enabled then
+                    fireproximityprompt(obj, 1)
+                end
+            end
+        end
+    end
+end)
+
+local lastSell = 0
+RunService.Heartbeat:Connect(function()
+    if not State.AutoSell then return end
+    local now = os.clock()
+    if now - lastSell >= State.SellInterval then
+        lastSell = now
+        local remote = GetRemote()
+        if remote then
+            pcall(function() remote:FireServer(unpack({ Config.OpCodes.OpenSell })) end)
+            task.delay(0.5, function()
+                pcall(function() remote:FireServer(unpack({ Config.OpCodes.SellAll })) end)
+            end)
+        end
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not State.AutoBuy then return end
+    local remote = GetRemote()
+    if not remote then return end
+    
+    for _ = 1, State.BuySpeed do
+        for fishName, isSelected in pairs(State.BuyFishes) do
+            if isSelected then
+                local payload = { { { "Fish", fishName }, Config.OpCodes.BuyOp } }
+                pcall(function() remote:FireServer(unpack(payload)) end)
+            end
+        end
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not State.AutoPlace then return end
+    local remote = GetRemote()
+    if not remote then return end
+    
+    local char = LocalPlayer.Character
+    if not char or not char.PrimaryPart then return end
+    local basePos = char.PrimaryPart.Position
+
+    for _ = 1, State.PlaceSpeed do
+        for fishName, isSelected in pairs(State.PlaceFishes) do
+            if isSelected then
+                local offsetX = (math.random() - 0.5) * 8
+                local offsetZ = (math.random() - 0.5) * 8
+                local pos = Vector3.new(basePos.X + offsetX, basePos.Y, basePos.Z + offsetZ)
+                
+                local payload = { { { fishName, pos, "Mid" }, Config.OpCodes.PlaceOp } }
+                pcall(function() remote:FireServer(unpack(payload)) end)
+            end
+        end
+    end
+end)
