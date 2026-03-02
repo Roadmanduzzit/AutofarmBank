@@ -1,5 +1,5 @@
 -- ==============================================================================
--- YNW WE BE OUTTA HERE
+-- Focus Hub
 -- ==============================================================================
 
 -- Services
@@ -20,8 +20,16 @@ local Camera = Workspace.CurrentCamera
 -- ==============================================================================
 local State = {
     AutoMinigame = false,
+    
     AutoHarvest = false,
     AutoHarvestInterval = 1,
+    IgnoreMutated = false, 
+    KeepHarvestFishes = {}, 
+    
+    -- NEW Precision Weight Filters
+    TrashBelowWeight = 0, 
+    KeepAboveWeight = 0,
+    
     ESP = false,
     
     AutoSell = false,
@@ -72,20 +80,50 @@ local uiLoader = loadstring(game:HttpGet('https://raw.githubusercontent.com/topi
 local ui = uiLoader({ rounding = true, theme = 'blueberry', smoothDragging = true })
 ui.autoDisableToggles = true
 
-local window = ui.newWindow({ text = 'Focus', resize = true, size = Vector2.new(600, 450) })
+local window = ui.newWindow({ text = 'Focus', resize = true, size = Vector2.new(650, 500) })
 
 -- TAB 1: FARMING & ESP
 local farmMenu = window:addMenu({ text = 'Farming & ESP' })
-local actionSection = farmMenu:addSection({ text = 'Actions', side = 'left' })
-actionSection:addToggle({ text = 'Auto-Fish', state = false }, function(v) State.AutoMinigame = v end)
+local actionSection = farmMenu:addSection({ text = 'Harvesting', side = 'left' })
+actionSection:addToggle({ text = 'Auto-Win Minigame', state = false }, function(v) State.AutoMinigame = v end)
 actionSection:addToggle({ text = 'Auto-Harvest', state = false }, function(v) State.AutoHarvest = v end)
+actionSection:addToggle({ text = 'Ignore Mutated Fishes', state = false }, function(v) State.IgnoreMutated = v end):setTooltip("If ON, mutated fishes will never be auto-harvested.")
+
+-- NEW: PRECISION TEXTBOXES
+actionSection:addTextbox({ text = 'Trash Below Weight (e.g. 10.5)' }):bindToEvent('onFocusLost', function(text)
+    local num = tonumber(text)
+    if num then
+        State.TrashBelowWeight = num
+        ui.notify({title = 'Weight Filter', message = 'Force-Harvesting below ' .. num .. 'kg', duration = 3})
+    else
+        State.TrashBelowWeight = 0
+        ui.notify({title = 'Weight Filter', message = 'Trash Below Filter OFF', duration = 3})
+    end
+end):setTooltip("Type a number. Harvests ANY fish smaller than this, ignoring mutations.")
+
+actionSection:addTextbox({ text = 'Keep Above Weight (e.g. 50.2)' }):bindToEvent('onFocusLost', function(text)
+    local num = tonumber(text)
+    if num then
+        State.KeepAboveWeight = num
+        ui.notify({title = 'Weight Filter', message = 'Protecting all fish above ' .. num .. 'kg', duration = 3})
+    else
+        State.KeepAboveWeight = 0
+        ui.notify({title = 'Weight Filter', message = 'Keep Above Filter OFF', duration = 3})
+    end
+end):setTooltip("Type a number. Protects ANY fish bigger than this, even if it has NO mutations.")
+
 actionSection:addSlider({ text = 'Harvest Interval', min = 0.5, max = 5, step = 0.5, val = 1 }, function(v) State.AutoHarvestInterval = v end)
 
-local espSection = farmMenu:addSection({ text = 'Visuals', side = 'right' })
+local espSection = farmMenu:addSection({ text = 'Visuals', side = 'left' })
 espSection:addToggle({ text = 'Fish ESP', state = false }, function(v)
     State.ESP = v
-    if v then ui.notify({title = 'ESP', message = 'Esp loaded Thanks For using focus', duration = 2}) end
-end):setTooltip("Displays accurate fish mutations, weight, and egg progress.")
+    if v then ui.notify({title = 'ESP', message = 'ESP Active! Scanning live mutators...', duration = 2}) end
+end)
+
+local harvestKeepSec = farmMenu:addSection({ text = 'Do NOT Harvest', side = 'right' })
+for _, fishName in ipairs(Config.AvailableFishes) do
+    harvestKeepSec:addToggle({ text = fishName, state = false }, function(v) State.KeepHarvestFishes[fishName] = v end)
+end
 
 -- TAB 2: ECONOMY
 local econMenu = window:addMenu({ text = 'Economy' })
@@ -96,7 +134,7 @@ sellSection:addSlider({ text = 'Interval (Seconds)', min = 5, max = 60, step = 1
 -- TAB 3: AUTO-BUY
 local buyMenu = window:addMenu({ text = 'Auto-Buy' })
 local buyControlSec = buyMenu:addSection({ text = 'Controls', side = 'left' })
-buyControlSec:addToggle({ text = 'Auto-Buy', state = false }, function(v) State.AutoBuy = v end)
+buyControlSec:addToggle({ text = 'Enable Turbo Auto-Buy', state = false }, function(v) State.AutoBuy = v end)
 buyControlSec:addSlider({ text = 'Speed (Buys/Frame)', min = 1, max = 20, step = 1, val = 1 }, function(v) State.BuySpeed = v end)
 buyControlSec:addButton({ text = 'Select All', style = 'small' }, function()
     for _, f in ipairs(Config.AvailableFishes) do State.BuyFishes[f] = true end
@@ -111,7 +149,7 @@ end
 -- TAB 4: AUTO-PLACE
 local placeMenu = window:addMenu({ text = 'Auto-Place' })
 local placeControlSec = placeMenu:addSection({ text = 'Controls', side = 'left' })
-placeControlSec:addToggle({ text = 'Enable Auto-Place', state = false }, function(v) State.AutoPlace = v end)
+placeControlSec:addToggle({ text = 'Enable Turbo Auto-Place', state = false }, function(v) State.AutoPlace = v end)
 placeControlSec:addSlider({ text = 'Speed (Spawns/Frame)', min = 1, max = 20, step = 1, val = 1 }, function(v) State.PlaceSpeed = v end)
 placeControlSec:addButton({ text = 'Select All', style = 'small' }, function()
     for _, f in ipairs(Config.AvailableFishes) do State.PlaceFishes[f] = true end
@@ -124,7 +162,7 @@ for _, fishName in ipairs(Config.AvailableFishes) do
 end
 
 -- ==============================================================================
--- 👁️ ESP SYSTEM (Hybrid UI-Scraper & Tag System)
+-- 👁️ ESP SYSTEM
 -- ==============================================================================
 local FishESP = { Tracked = {}, Connections = {} }
 
@@ -132,7 +170,6 @@ function FishESP:GetMutators(instance, fishUI)
     local mutators = {}
     local found = {}
 
-    -- Method 1: Scrape from the game's actual hidden UI (Most reliable for dynamic updates)
     if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("Mutations") then
         for _, child in ipairs(fishUI.Holder.Mutations:GetChildren()) do
             if child:IsA("TextLabel") and child.Visible and child.Name ~= "MutationNameTemplate" and child.Name ~= "PlusTemplate" then
@@ -144,7 +181,6 @@ function FishESP:GetMutators(instance, fishUI)
         end
     end
 
-    -- Method 2: Fallback to CollectionService tags
     for _, tag in ipairs(CollectionService:GetTags(instance)) do
         if string.find(tag, "Mutator$") then
             local m = string.gsub(tag, "Mutator", "")
@@ -200,7 +236,6 @@ function FishESP:UpdateNode(data)
 
     if data.IsEgg then
         local progress = "Waiting..."
-        -- Scrape live egg percentage
         if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("Progress") then
             progress = fishUI.Holder.Progress.Text
         end
@@ -209,7 +244,6 @@ function FishESP:UpdateNode(data)
         local fishId = data.Instance:GetAttribute("FishId") or "Unknown"
         local weight = data.Instance:GetAttribute("Weight") or 0
         
-        -- Override generic ID with exact display name from UI
         if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("FishName") then
             fishId = fishUI.Holder.FishName.Text
         end
@@ -228,12 +262,8 @@ end
 
 function FishESP:Add(instance, isEgg)
     if self.Tracked[instance] then return end
-    
     task.spawn(function()
-        if not instance.PrimaryPart then
-            instance:GetPropertyChangedSignal("PrimaryPart"):Wait()
-        end
-        
+        if not instance.PrimaryPart then instance:GetPropertyChangedSignal("PrimaryPart"):Wait() end
         if not instance or not instance.Parent then return end
 
         local billboard, label = self:CreateNode(instance, isEgg)
@@ -263,7 +293,6 @@ function FishESP:Init()
 
     table.insert(self.Connections, CollectionService:GetInstanceAddedSignal("SpawnedEgg"):Connect(function(i) self:Add(i, true) end))
     table.insert(self.Connections, CollectionService:GetInstanceAddedSignal("Fish"):Connect(function(i) self:Add(i, false) end))
-    
     table.insert(self.Connections, CollectionService:GetInstanceRemovedSignal("SpawnedEgg"):Connect(function(i) self:Remove(i) end))
     table.insert(self.Connections, CollectionService:GetInstanceRemovedSignal("Fish"):Connect(function(i) self:Remove(i) end))
 
@@ -271,7 +300,7 @@ function FishESP:Init()
     table.insert(self.Connections, RunService.RenderStepped:Connect(function()
         local camPos = Camera.CFrame.Position
         updateCounter = updateCounter + 1
-        local shouldUpdateData = (updateCounter % 30 == 0) -- Force data refresh every ~0.5 seconds
+        local shouldUpdateData = (updateCounter % 30 == 0)
 
         for inst, data in pairs(self.Tracked) do
             if inst and inst.PrimaryPart then
@@ -280,10 +309,7 @@ function FishESP:Init()
                 if State.ESP and isValidParent then
                     local dist = (inst.PrimaryPart.Position - camPos).Magnitude
                     data.Billboard.Enabled = dist <= 200
-                    
-                    if shouldUpdateData then 
-                        self:UpdateNode(data) 
-                    end
+                    if shouldUpdateData then self:UpdateNode(data) end
                 else
                     data.Billboard.Enabled = false
                 end
@@ -299,6 +325,8 @@ FishESP:Init()
 -- ==============================================================================
 -- 🧠 BACKGROUND LOGIC (Engines)
 -- ==============================================================================
+
+-- 1. Auto-Minigame (Perfect Catch)
 RunService.RenderStepped:Connect(function()
     if not State.AutoMinigame then return end
     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -321,6 +349,7 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
+-- 2. SMART PRECISION Auto-Harvest
 local lastHarvest = 0
 RunService.Heartbeat:Connect(function()
     if not State.AutoHarvest then return end
@@ -331,13 +360,57 @@ RunService.Heartbeat:Connect(function()
         if fishFolder then
             for _, obj in ipairs(fishFolder:GetDescendants()) do
                 if obj:IsA("ProximityPrompt") and obj.ActionText == "Collect" and obj.Enabled then
-                    fireproximityprompt(obj, 1)
+                    local primaryPart = obj.Parent
+                    local model = primaryPart and primaryPart.Parent
+                    
+                    if model then
+                        local fishWeight = model:GetAttribute("Weight") or 0
+                        local fishUI = primaryPart:FindFirstChild("FishInfoUI")
+                        
+                        -- 1. ABSOLUTE PROTECTION: Keep Above Weight
+                        if State.KeepAboveWeight > 0 and fishWeight >= State.KeepAboveWeight then
+                            continue -- Protect the heavy fish! Skip everything else.
+                        end
+
+                        -- 2. ABSOLUTE HARVEST: Trash Below Weight
+                        if State.TrashBelowWeight > 0 and fishWeight <= State.TrashBelowWeight then
+                            fireproximityprompt(obj, 1) -- Instantly harvest the small fish
+                            continue
+                        end
+
+                        -- 3. STANDARD PROTECTION CHECKS
+                        local fishName = model:GetAttribute("FishId") or ""
+                        if fishUI and fishUI:FindFirstChild("Holder") and fishUI.Holder:FindFirstChild("FishName") then
+                            fishName = fishUI.Holder.FishName.Text
+                        end
+                        
+                        local isProtected = false
+                        for _, aName in ipairs(Config.AvailableFishes) do
+                            if string.find(fishName, aName) and State.KeepHarvestFishes[aName] then
+                                isProtected = true
+                                break
+                            end
+                        end
+                        
+                        if isProtected then continue end -- Skip protected species
+                        
+                        if State.IgnoreMutated then
+                            local mutators = FishESP:GetMutators(model, fishUI)
+                            if #mutators > 0 then
+                                continue -- Skip mutated fish
+                            end
+                        end
+                        
+                        -- If it survived all checks, collect it!
+                        fireproximityprompt(obj, 1)
+                    end
                 end
             end
         end
     end
 end)
 
+-- 3. Auto-Sell Engine
 local lastSell = 0
 RunService.Heartbeat:Connect(function()
     if not State.AutoSell then return end
@@ -354,6 +427,7 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
+-- 4. Turbo Auto-Buy Engine
 RunService.Heartbeat:Connect(function()
     if not State.AutoBuy then return end
     local remote = GetRemote()
@@ -369,6 +443,7 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
+-- 5. Turbo Auto-Place Engine
 RunService.Heartbeat:Connect(function()
     if not State.AutoPlace then return end
     local remote = GetRemote()
@@ -391,3 +466,5 @@ RunService.Heartbeat:Connect(function()
         end
     end
 end)
+
+ui.notify({title = 'Loaded', message = 'Focus Loaded! Thanks For Using us!', duration = 3})
