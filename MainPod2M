@@ -1,0 +1,491 @@
+-- // ========================================== //
+-- //    FOCUSHUB NATIVE (BIG MOBILE EDITION)    //
+-- // ========================================== //
+
+-- [[ 1. ANTI-CHEAT BYPASS ]] --
+local g = getinfo or debug.getinfo
+local x, y
+setthreadidentity(2)
+for i, v in getgc(true) do
+    if typeof(v) == "table" then
+        local a = rawget(v, "Detected")
+        local b = rawget(v, "Kill")
+        if typeof(a) == "function" and not x then
+            x = a
+            hookfunction(x, function(c, f, n) return true end)
+        end
+        if rawget(v, "Variables") and rawget(v, "Process") and typeof(b) == "function" and not y then
+            y = b
+            hookfunction(y, function(f) end)
+        end
+    end
+end
+local o; o = hookfunction(getrenv().debug.info, newcclosure(function(...)
+    local a, f = ...
+    if x and a == x then return coroutine.yield(coroutine.running()) end
+    return o(...)
+end))
+setthreadidentity(7)
+
+-- [[ 2. SERVICES ]] --
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- [[ 3. CONFIGURATION ]] --
+local Config = {
+    SilentAim = { Enabled = false, FOV = 200, ShowFOV = false, HitChance = 100, TargetPart = "Head", WallCheck = true, Visuals = false },
+    Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, MaxDist = 2000 },
+    Movement = { SlideEnabled = false, SlideSpeed = 45, FlyEnabled = false, FlySpeed = 45, Noclip = false },
+    Combat = { InfAmmo = false, RapidFire = false, NoRecoil = false },
+    Autofarm = { Enabled = false, Speed = 30, WaitTime = 2, Offset = Vector3.new(0,3,0) },
+    Misc = { InfStamina = false, CashPickup = false, PickupRange = 30, AntiAFK = false }
+}
+
+-- Logic Variables
+local ESP_Storage = {}
+local Movers = { SlideBV = nil, SlideBG = nil, FlyBV = nil, FlyBG = nil }
+local MoveKeys = {[Enum.KeyCode.W]=false, [Enum.KeyCode.A]=false, [Enum.KeyCode.S]=false, [Enum.KeyCode.D]=false}
+local CurrentHighlight, CurrentTarget = nil, nil
+local NoclipConnection = nil
+
+-- Visuals (Silent Aim)
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Color = Color3.fromRGB(255, 0, 80)
+FOVCircle.Thickness = 1.5; FOVCircle.NumSides = 64; FOVCircle.Filled = false; FOVCircle.Visible = false
+
+-- [[ 4. LOGIC FUNCTIONS ]] --
+
+-- > SILENT AIM LOGIC
+local function IsVisible(part)
+    if not Config.SilentAim.WallCheck then return true end
+    local origin = Camera.CFrame.Position
+    local direction = (part.Position - origin).Unit * (part.Position - origin).Magnitude
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {LocalPlayer.Character, Camera, Workspace:FindFirstChild("OBJECTS"), Workspace:FindFirstChild("Ray_Ignore")}
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local result = Workspace:Raycast(origin, direction, params)
+    return result and result.Instance:IsDescendantOf(part.Parent) or true
+end
+
+local function UpdateHighlight(targetChar)
+    if CurrentHighlight then CurrentHighlight:Destroy(); CurrentHighlight = nil end
+    if Config.SilentAim.Visuals and targetChar then
+        local hl = Instance.new("Highlight")
+        hl.Adornee = targetChar; hl.FillColor = Color3.fromRGB(255,0,0); hl.OutlineColor = Color3.fromRGB(255,255,255)
+        hl.FillTransparency = 0.5; hl.OutlineTransparency = 0.5; hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = targetChar; CurrentHighlight = hl
+    end
+end
+
+local function GetClosestTarget()
+    local MousePos = UserInputService:GetMouseLocation()
+    local ClosestDist = Config.SilentAim.FOV
+    local Target, Char = nil, nil
+
+    if Config.SilentAim.Enabled then
+        for _, v in pairs(Players:GetPlayers()) do
+            if v ~= LocalPlayer and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+                local Part = v.Character:FindFirstChild(Config.SilentAim.TargetPart) or v.Character:FindFirstChild("Head")
+                if Part then
+                    local ScreenPos, OnScreen = Camera:WorldToViewportPoint(Part.Position)
+                    if OnScreen then
+                        local Dist = (Vector2.new(ScreenPos.X, ScreenPos.Y) - MousePos).Magnitude
+                        if Dist < ClosestDist and IsVisible(Part) then
+                            ClosestDist = Dist; Target = Part; Char = v.Character
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if Char ~= CurrentTarget then CurrentTarget = Char; UpdateHighlight(Char) end
+    return Target
+end
+
+local OldNamecall
+OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local Args = {...}
+    if getnamecallmethod() == "ScreenPointToRay" and self == Camera and Config.SilentAim.Enabled and CurrentTarget then
+        local TargetPart = CurrentTarget:FindFirstChild(Config.SilentAim.TargetPart)
+        if TargetPart and math.random(1, 100) <= Config.SilentAim.HitChance then
+            return Ray.new(Camera.CFrame.Position, (TargetPart.Position - Camera.CFrame.Position).Unit)
+        end
+    end
+    return OldNamecall(self, ...)
+end))
+
+-- > MOVEMENT LOGIC
+local function UpdateMovers(state, type)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    if type == "Slide" then
+        if state then
+            if not Movers.SlideBV then
+                Movers.SlideBV = Instance.new("BodyVelocity", root); Movers.SlideBV.MaxForce = Vector3.new(1e5,0,1e5)
+                Movers.SlideBG = Instance.new("BodyGyro", root); Movers.SlideBG.MaxTorque = Vector3.new(1e5,0,1e5); Movers.SlideBG.P=10000
+            end
+        else
+            if Movers.SlideBV then Movers.SlideBV:Destroy(); Movers.SlideBV = nil end
+            if Movers.SlideBG then Movers.SlideBG:Destroy(); Movers.SlideBG = nil end
+        end
+    elseif type == "Fly" then
+        if state then
+            if not Movers.FlyBV then
+                Movers.FlyBV = Instance.new("BodyVelocity", root); Movers.FlyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
+                Movers.FlyBG = Instance.new("BodyGyro", root); Movers.FlyBG.MaxTorque = Vector3.new(1e9,1e9,1e9); Movers.FlyBG.P=10000
+            end
+            char.Humanoid.PlatformStand = true
+        else
+            if Movers.FlyBV then Movers.FlyBV:Destroy(); Movers.FlyBV = nil end
+            if Movers.FlyBG then Movers.FlyBG:Destroy(); Movers.FlyBG = nil end
+            char.Humanoid.PlatformStand = false
+        end
+    end
+end
+
+-- > ESP LOGIC
+local function CreateDrawing(t, p) local d = Drawing.new(t); for k,v in pairs(p) do d[k]=v end; return d end
+local function HandleESP()
+    if not Config.Visuals.Enabled then for _,p in pairs(ESP_Storage) do for _,d in pairs(p) do d.Visible=false end end return end
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            if not ESP_Storage[plr] then
+                ESP_Storage[plr] = {
+                    Box = CreateDrawing("Square", {Thickness=1, Color=Color3.new(1,1,1), Filled=false}),
+                    Name = CreateDrawing("Text", {Size=13, Center=true, Outline=true, Color=Color3.new(1,1,1)}),
+                    Bar = CreateDrawing("Square", {Filled=true}),
+                    Tool = CreateDrawing("Text", {Size=12, Center=true, Outline=true, Color=Color3.new(0.8,0.8,1)})
+                }
+            end
+            local d = ESP_Storage[plr]
+            local char, root, hum = plr.Character, plr.Character and plr.Character:FindFirstChild("HumanoidRootPart"), plr.Character and plr.Character:FindFirstChild("Humanoid")
+            local show = false
+            if root and hum and hum.Health > 0 then
+                local pos, vis = Camera:WorldToViewportPoint(root.Position)
+                if vis and (root.Position - Camera.CFrame.Position).Magnitude <= Config.Visuals.MaxDist then
+                    show = true
+                    local h = 1000/pos.Z * 3.5; local w = h/2; local x = pos.X - w/2; local y = pos.Y - h/2
+                    if Config.Visuals.Box then d.Box.Visible=true; d.Box.Size=Vector2.new(w,h); d.Box.Position=Vector2.new(x,y) else d.Box.Visible=false end
+                    if Config.Visuals.Name then d.Name.Visible=true; d.Name.Text=plr.Name; d.Name.Position=Vector2.new(x+w/2, y-16) else d.Name.Visible=false end
+                    if Config.Visuals.Health then
+                        local hp = math.clamp(hum.Health/hum.MaxHealth, 0, 1)
+                        d.Bar.Visible=true; d.Bar.Size=Vector2.new(2, h*hp); d.Bar.Position=Vector2.new(x-5, y+h-(h*hp)); d.Bar.Color=Color3.fromHSV(hp*0.3,1,1)
+                    else d.Bar.Visible=false end
+                    if Config.Visuals.Tool then
+                        local t = char:FindFirstChildWhichIsA("Tool")
+                        d.Tool.Visible = t ~= nil; d.Tool.Text = t and t.Name or ""; d.Tool.Position = Vector2.new(x + w/2, y + h + 2)
+                    else d.Tool.Visible = false end
+                end
+            end
+            if not show then for _, o in pairs(d) do o.Visible = false end end
+        end
+    end
+end
+Players.PlayerRemoving:Connect(function(p) if ESP_Storage[p] then for _,d in pairs(ESP_Storage[p]) do d:Remove() end ESP_Storage[p]=nil end end)
+
+-- > FARMING LOGIC
+local function IsSpillDirty(m) local d = m:FindFirstChildWhichIsA("Decal", true); return d and d.Transparency < 0.1 end
+local function CleanSpill(m) local p = m:FindFirstChildWhichIsA("ProximityPrompt", true); if p then fireproximityprompt(p) return true end return false end
+local function TweenTo(pos)
+    local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not r then return false end
+    local time = (r.Position - pos).Magnitude / Config.Autofarm.Speed
+    local t = TweenService:Create(r, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = CFrame.new(pos + Config.Autofarm.Offset)})
+    t:Play()
+    local passed = 0
+    while passed < time do if not Config.Autofarm.Enabled then t:Cancel() return false end task.wait(0.1) passed=passed+0.1 end
+    return true
+end
+
+-- > ANTI-AFK LOGIC
+local Environment = {
+    IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
+    HasVirtualUser = pcall(function() return VirtualUser:CaptureController() end),
+    HasVIM = type(VirtualInputManager) == "userdata"
+}
+
+local function MobileCameraNudge()
+    if not Camera then return end
+    local originalCFrame = Camera.CFrame
+    local targetCFrame = originalCFrame * CFrame.Angles(0, math.rad(math.random(-2, 2)), 0)
+    local tweenIn = TweenService:Create(Camera, TweenInfo.new(0.5, Enum.EasingStyle.Sine), {CFrame = targetCFrame})
+    local tweenOut = TweenService:Create(Camera, TweenInfo.new(0.5, Enum.EasingStyle.Sine), {CFrame = originalCFrame})
+    tweenIn:Play(); tweenIn.Completed:Wait()
+    task.wait(0.1); tweenOut:Play()
+end
+
+LocalPlayer.Idled:Connect(function()
+    if not Config.Misc.AntiAFK then return end
+    
+    print("[FocusMobile] Idled event triggered. Anti-AFK is simulating movement to prevent kick.")
+    
+    -- Execute multiple input methods to guarantee AFK timer reset safely
+    if Environment.HasVirtualUser then
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2), Camera.CFrame)
+        end)
+    elseif Environment.HasVIM then
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
+        end)
+    end
+    
+    if Environment.IsMobile then task.spawn(MobileCameraNudge) end
+    
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum:GetState() ~= Enum.HumanoidStateType.Dead and math.random(1, 3) == 1 then
+        hum.Jump = true
+    end
+end)
+
+local lastNudge = os.clock()
+RunService.Heartbeat:Connect(function()
+    if Config.Misc.AntiAFK and os.clock() - lastNudge >= 180 then
+        lastNudge = os.clock()
+        task.spawn(MobileCameraNudge)
+    end
+end)
+
+
+-- [[ 5. UI SYSTEM (BIG MOBILE) ]] --
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "FocusNativeBig"
+pcall(function() if gethui then ScreenGui.Parent = gethui() elseif CoreGui then ScreenGui.Parent = CoreGui else ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end end)
+
+local MainFrame, ToggleBtn
+
+-- > Mobile Toggle Button (BIGGER)
+ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Name = "MobileToggle"
+ToggleBtn.Size = UDim2.new(0, 80, 0, 80)
+ToggleBtn.Position = UDim2.new(1, -90, 0.4, 0)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
+ToggleBtn.Text = "🛡️"
+ToggleBtn.TextSize = 40
+ToggleBtn.Parent = ScreenGui
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 20)
+
+-- > Main Window (BIGGER)
+MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 360, 0, 480)
+MainFrame.Position = UDim2.new(1, -460, 0.4, -200)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.Visible = false
+MainFrame.Active = true
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
+
+ToggleBtn.MouseButton1Click:Connect(function() MainFrame.Visible = not MainFrame.Visible end)
+
+-- > Header & Tabs
+local Title = Instance.new("TextLabel")
+Title.Text = "FocusMobile"; Title.Size = UDim2.new(1, -20, 0, 40); Title.Position = UDim2.new(0, 15, 0, 5)
+Title.BackgroundTransparency = 1; Title.TextColor3 = Color3.fromRGB(255, 255, 255); Title.Font = Enum.Font.GothamBold; Title.TextSize = 24; Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = MainFrame
+
+local TabContainer = Instance.new("Frame")
+TabContainer.Size = UDim2.new(1, -20, 0, 45); TabContainer.Position = UDim2.new(0, 10, 0, 50)
+TabContainer.BackgroundTransparency = 1; TabContainer.Parent = MainFrame
+local TabList = Instance.new("UIListLayout"); TabList.Parent = TabContainer; TabList.FillDirection = Enum.FillDirection.Horizontal; TabList.Padding = UDim.new(0, 8)
+
+local ContentContainer = Instance.new("Frame")
+ContentContainer.Size = UDim2.new(1, -20, 1, -110); ContentContainer.Position = UDim2.new(0, 10, 0, 105)
+ContentContainer.BackgroundTransparency = 1; ContentContainer.Parent = MainFrame
+
+-- > Tab Helper
+local CurrentTab = nil
+local function CreateTab(name)
+    local btn = Instance.new("TextButton")
+    btn.Text = name; btn.Size = UDim2.new(0, 75, 1, 0) -- Wider Tabs
+    btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45); btn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    btn.Font = Enum.Font.GothamBold; btn.TextSize = 16; btn.Parent = TabContainer
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    
+    local page = Instance.new("ScrollingFrame")
+    page.Size = UDim2.new(1, 0, 1, 0); page.BackgroundTransparency = 1; page.Visible = false; page.Parent = ContentContainer
+    page.ScrollBarThickness = 6 -- Thicker Scrollbar
+    local layout = Instance.new("UIListLayout"); layout.Parent = page; layout.Padding = UDim.new(0, 10); layout.SortOrder = Enum.SortOrder.LayoutOrder
+    
+    btn.MouseButton1Click:Connect(function()
+        if CurrentTab then CurrentTab.Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45); CurrentTab.Page.Visible = false end
+        CurrentTab = {Btn = btn, Page = page}
+        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 100); page.Visible = true
+    end)
+    
+    if CurrentTab == nil then 
+        CurrentTab = {Btn = btn, Page = page}
+        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 100); page.Visible = true
+    end
+    
+    return page
+end
+
+-- > Element Helpers
+local function AddToggle(page, text, default, cb)
+    local f = Instance.new("Frame"); f.Size = UDim2.new(1, 0, 0, 55); f.BackgroundColor3 = Color3.fromRGB(35, 35, 40); f.Parent = page
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+    local l = Instance.new("TextLabel"); l.Text = text; l.Size = UDim2.new(0.65, 0, 1, 0); l.Position = UDim2.new(0.05, 0, 0, 0); l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.fromRGB(255, 255, 255); l.Font = Enum.Font.Gotham; l.TextSize = 18; l.TextXAlignment = Enum.TextXAlignment.Left; l.Parent = f
+    local b = Instance.new("TextButton"); b.Text = ""; b.Size = UDim2.new(0, 60, 0, 30); b.Position = UDim2.new(0.75, 0, 0.5, -15); b.Parent = f
+    b.BackgroundColor3 = default and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(60, 60, 60)
+    Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
+    local on = default
+    b.MouseButton1Click:Connect(function() on = not on; b.BackgroundColor3 = on and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(60, 60, 60); cb(on) end)
+end
+
+local function AddSlider(page, text, min, max, default, cb)
+    local f = Instance.new("Frame"); f.Size = UDim2.new(1, 0, 0, 65); f.BackgroundColor3 = Color3.fromRGB(35, 35, 40); f.Parent = page
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+    local l = Instance.new("TextLabel"); l.Text = text .. ": " .. default; l.Size = UDim2.new(1, 0, 0, 25); l.Position = UDim2.new(0.05, 0, 0, 5); l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.fromRGB(255, 255, 255); l.Font = Enum.Font.Gotham; l.TextSize = 18; l.TextXAlignment = Enum.TextXAlignment.Left; l.Parent = f
+    local bg = Instance.new("TextButton"); bg.Text = ""; bg.Size = UDim2.new(0.9, 0, 0, 15); bg.Position = UDim2.new(0.05, 0, 0, 35); bg.BackgroundColor3 = Color3.fromRGB(60, 60, 60); bg.Parent = f
+    local fill = Instance.new("Frame"); fill.Size = UDim2.new((default-min)/(max-min), 0, 1, 0); fill.BackgroundColor3 = Color3.fromRGB(0, 180, 100); fill.BorderSizePixel = 0; fill.Parent = bg
+    bg.MouseButton1Down:Connect(function()
+        local c; c = UserInputService.InputChanged:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+                local s = math.clamp((i.Position.X - bg.AbsolutePosition.X)/bg.AbsoluteSize.X, 0, 1)
+                local v = math.floor(min + ((max-min)*s))
+                fill.Size = UDim2.new(s, 0, 1, 0); l.Text = text .. ": " .. v; cb(v)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then c:Disconnect() end end)
+    end)
+end
+
+-- [[ 6. POPULATE TABS ]] --
+
+-- > COMBAT
+local PageCombat = CreateTab("Aim")
+AddToggle(PageCombat, "Silent Aim", false, function(v) Config.SilentAim.Enabled = v end)
+AddToggle(PageCombat, "Show FOV", false, function(v) Config.SilentAim.ShowFOV = v; FOVCircle.Visible = v end)
+AddToggle(PageCombat, "Red Chams", false, function(v) Config.SilentAim.Visuals = v; if not v and CurrentHighlight then CurrentHighlight:Destroy() end end)
+AddSlider(PageCombat, "FOV Size", 10, 500, 200, function(v) Config.SilentAim.FOV = v; FOVCircle.Radius = v end)
+AddToggle(PageCombat, "Inf Ammo", false, function(v) Config.Combat.InfAmmo = v end)
+AddToggle(PageCombat, "Rapid Fire", false, function(v) Config.Combat.RapidFire = v end)
+
+-- > VISUALS
+local PageVis = CreateTab("ESP")
+AddToggle(PageVis, "Enable ESP", false, function(v) Config.Visuals.Enabled = v; if not v then for _,p in pairs(ESP_Storage) do for _,d in pairs(p) do d.Visible=false end end end end)
+AddToggle(PageVis, "Box ESP", false, function(v) Config.Visuals.Box = v end)
+AddToggle(PageVis, "Name ESP", false, function(v) Config.Visuals.Name = v end)
+AddToggle(PageVis, "Health ESP", false, function(v) Config.Visuals.Health = v end)
+AddToggle(PageVis, "Weapon ESP", false, function(v) Config.Visuals.Tool = v end)
+AddSlider(PageVis, "Dist", 100, 5000, 2000, function(v) Config.Visuals.MaxDist = v end)
+
+-- > MOVEMENT
+local PageMove = CreateTab("Mov")
+AddToggle(PageMove, "Fly", false, function(v) Config.Movement.FlyEnabled = v; UpdateMovers(v, "Fly") end)
+AddSlider(PageMove, "Fly Spd", 10, 45, 45, function(v) Config.Movement.FlySpeed = v end)
+AddToggle(PageMove, "Slide", false, function(v) Config.Movement.SlideEnabled = v; UpdateMovers(v, "Slide") end)
+AddToggle(PageMove, "Noclip", false, function(v) Config.Movement.Noclip = v; if v then NoclipConnection=RunService.Stepped:Connect(function() if LocalPlayer.Character then for _,p in pairs(LocalPlayer.Character:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide=false end end end end) else if NoclipConnection then NoclipConnection:Disconnect() end end end)
+AddToggle(PageMove, "Inf Stamina", false, function(v) Config.Misc.InfStamina = v end)
+
+-- > FARMING
+local PageFarm = CreateTab("Farm")
+AddSlider(PageFarm, "Speed", 10, 30, 30, function(v) Config.Autofarm.Speed = v end)
+AddToggle(PageFarm, "Spill Auto", false, function(v)
+    Config.Autofarm.Enabled = v
+    if v then
+        task.spawn(function()
+            local sys = Workspace:FindFirstChild("SpillSystem")
+            while Config.Autofarm.Enabled and sys do
+                for _, spill in pairs(sys:GetChildren()) do
+                    if not Config.Autofarm.Enabled then break end
+                    local target = (spill:IsA("Model") and spill.PrimaryPart) or (spill:IsA("BasePart") and spill)
+                    if target and IsSpillDirty(spill) then
+                        if TweenTo(target.Position) and Config.Autofarm.Enabled then
+                            if IsSpillDirty(spill) then CleanSpill(spill) task.wait(Config.Autofarm.WaitTime) end
+                        end
+                    end
+                end
+                task.wait(1)
+            end
+        end)
+    end
+end)
+AddToggle(PageFarm, "Cash Magnet", false, function(v) Config.Misc.CashPickup = v end)
+
+-- > MISC (NEW TAB FOR ANTI-AFK)
+local PageMisc = CreateTab("Misc")
+AddToggle(PageMisc, "Anti-AFK", false, function(v) 
+    Config.Misc.AntiAFK = v 
+    -- ADDED PRINT STATEMENT HERE:
+    if v then
+        print("[FocusMobile] Anti-AFK is now ACTIVE. You are protected from 20-minute kicks.")
+    else
+        print("[FocusMobile] Anti-AFK is now DISABLED.")
+    end
+end)
+
+-- [[ 7. LOOPS ]] --
+RunService.RenderStepped:Connect(function()
+    FOVCircle.Position = UserInputService:GetMouseLocation()
+    FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
+    if Config.SilentAim.Enabled then GetClosestTarget() else UpdateHighlight(nil) end
+    HandleESP()
+    
+    local camCF = Camera.CFrame
+    local moveDir = Vector3.zero
+    if MoveKeys[Enum.KeyCode.W] then moveDir = moveDir + camCF.LookVector end
+    if MoveKeys[Enum.KeyCode.S] then moveDir = moveDir - camCF.LookVector end
+    if MoveKeys[Enum.KeyCode.A] then moveDir = moveDir - camCF.RightVector end
+    if MoveKeys[Enum.KeyCode.D] then moveDir = moveDir + camCF.RightVector end
+    
+    if Config.Movement.FlyEnabled and Movers.FlyBV then
+        if moveDir.Magnitude > 0 then Movers.FlyBV.Velocity = moveDir.Unit * Config.Movement.FlySpeed; Movers.FlyBG.CFrame = CFrame.lookAt(Movers.FlyBV.Parent.Position, Movers.FlyBV.Parent.Position + moveDir)
+        else Movers.FlyBV.Velocity = Vector3.zero; Movers.FlyBG.CFrame = camCF end
+    end
+    if Config.Movement.SlideEnabled and Movers.SlideBV then
+        local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+        if flatDir.Magnitude > 0 then Movers.SlideBV.Velocity = flatDir.Unit * Config.Movement.SlideSpeed; Movers.SlideBG.CFrame = CFrame.lookAt(Movers.SlideBV.Parent.Position, Movers.SlideBV.Parent.Position + flatDir)
+        else Movers.SlideBV.Velocity = Vector3.zero end
+    end
+    
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildWhichIsA("Tool")
+    if tool and tool:FindFirstChild("Stats") then
+        if Config.Combat.RapidFire then tool.Stats.FireRate.Value = 0; tool.Stats.GunType.Value = "Auto" end
+        if Config.Combat.NoRecoil then tool.Stats.Recoil.Value = 0 end
+        if Config.Combat.InfAmmo and tool.Stats.ClipSize.Value <= 0 then
+            ReplicatedStorage.GunRemotes.Reload:FireServer(tool, true)
+            tool.Stats.ClipSize.Value = tool.Stats.MaxAmmo.Value
+        end
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if Config.Misc.CashPickup then
+        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local folder = Workspace:FindFirstChild("OBJECTS")
+        if root and folder then
+            for _, item in pairs(folder:GetChildren()) do
+                if item.Name == "CashHandle" and (item.Position - root.Position).Magnitude <= Config.Misc.PickupRange then
+                    local p = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if p and p.Enabled then p.HoldDuration = 0; fireproximityprompt(p) end
+                end
+            end
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(i,g) if not g and MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode]=true end end)
+UserInputService.InputEnded:Connect(function(i) if MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode]=false end end)
+local oldIdx; oldIdx = hookmetamethod(game, "__newindex", function(t, k, v) if Config.Misc.InfStamina and t.Name == "Stamina" and k == "Value" then return oldIdx(t, k, 100) end return oldIdx(t, k, v) end)
+
+print("FocusMobile Loaded")
