@@ -1,5 +1,5 @@
 -- // ========================================== //
--- //      Focus Premium Hub (FINAL V5.1) //
+-- //      Focus Premium Hub (FINAL V5.1)        //
 -- // ========================================== //
 
 -- [[ 1. ADONIS BYPASS ]] --
@@ -20,7 +20,8 @@ for i, v in getgc(true) do
         end
     end
 end
-local o; o = hookfunction(getrenv().debug.info, newcclosure(function(...)
+local o;
+o = hookfunction(getrenv().debug.info, newcclosure(function(...)
     local a, f = ...
     if x and a == x then return coroutine.yield(coroutine.running()) end
     return o(...)
@@ -172,8 +173,10 @@ local function UpdateMovers(state, type)
     if type == "Slide" then
         if state then
             if not Movers.SlideBV then
-                Movers.SlideBV = Instance.new("BodyVelocity", root); Movers.SlideBV.MaxForce = Vector3.new(1e5,0,1e5)
-                Movers.SlideBG = Instance.new("BodyGyro", root); Movers.SlideBG.MaxTorque = Vector3.new(1e5,0,1e5); Movers.SlideBG.P=10000
+                Movers.SlideBV = Instance.new("BodyVelocity", root);
+                Movers.SlideBV.MaxForce = Vector3.new(1e5,0,1e5)
+                Movers.SlideBG = Instance.new("BodyGyro", root);
+                Movers.SlideBG.MaxTorque = Vector3.new(1e5,0,1e5); Movers.SlideBG.P=10000
             end
         else
             if Movers.SlideBV then Movers.SlideBV:Destroy(); Movers.SlideBV = nil end
@@ -182,8 +185,10 @@ local function UpdateMovers(state, type)
     elseif type == "Fly" then
         if state then
             if not Movers.FlyBV then
-                Movers.FlyBV = Instance.new("BodyVelocity", root); Movers.FlyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
-                Movers.FlyBG = Instance.new("BodyGyro", root); Movers.FlyBG.MaxTorque = Vector3.new(1e9,1e9,1e9); Movers.FlyBG.P=10000
+                Movers.FlyBV = Instance.new("BodyVelocity", root);
+                Movers.FlyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
+                Movers.FlyBG = Instance.new("BodyGyro", root);
+                Movers.FlyBG.MaxTorque = Vector3.new(1e9,1e9,1e9); Movers.FlyBG.P=10000
             end
             char.Humanoid.PlatformStand = true
         else
@@ -195,7 +200,8 @@ local function UpdateMovers(state, type)
 end
 
 -- [[ 5. ESP LOGIC ]] --
-local function CreateDrawing(t, p) local d = Drawing.new(t); for k,v in pairs(p) do d[k]=v end; return d end
+local function CreateDrawing(t, p) local d = Drawing.new(t);
+for k,v in pairs(p) do d[k]=v end; return d end
 
 local function RemoveESP(plr)
     if ESP_Storage[plr] then
@@ -231,18 +237,24 @@ local function HandleESP()
                 local pos, vis = Camera:WorldToViewportPoint(root.Position)
                 if vis and (root.Position - Camera.CFrame.Position).Magnitude <= Config.Visuals.MaxDist then
                     show = true
-                    local h = 1000/pos.Z * 3.5; local w = h/2; local x = pos.X - w/2; local y = pos.Y - h/2
+                    local h = 1000/pos.Z * 3.5;
+                    local w = h/2; local x = pos.X - w/2;
+                    local y = pos.Y - h/2
                     
-                    if Config.Visuals.Box then d.Box.Visible=true; d.Box.Size=Vector2.new(w,h); d.Box.Position=Vector2.new(x,y) else d.Box.Visible=false end
-                    if Config.Visuals.Name then d.Name.Visible=true; d.Name.Text=plr.Name; d.Name.Position=Vector2.new(x+w/2, y-16) else d.Name.Visible=false end
+                    if Config.Visuals.Box then d.Box.Visible=true;
+                    d.Box.Size=Vector2.new(w,h); d.Box.Position=Vector2.new(x,y) else d.Box.Visible=false end
+                    if Config.Visuals.Name then d.Name.Visible=true;
+                    d.Name.Text=plr.Name; d.Name.Position=Vector2.new(x+w/2, y-16) else d.Name.Visible=false end
                     if Config.Visuals.Health then
                         local hp = math.clamp(hum.Health/hum.MaxHealth, 0, 1)
-                        d.Bar.Visible=true; d.Bar.Size=Vector2.new(2, h*hp); d.Bar.Position=Vector2.new(x-5, y+h-(h*hp)); d.Bar.Color=Color3.fromHSV(hp*0.3,1,1)
+                        d.Bar.Visible=true;
+                        d.Bar.Size=Vector2.new(2, h*hp); d.Bar.Position=Vector2.new(x-5, y+h-(h*hp)); d.Bar.Color=Color3.fromHSV(hp*0.3,1,1)
                     else d.Bar.Visible=false end
                     
                     if Config.Visuals.Tool then
                         local tool = char:FindFirstChildWhichIsA("Tool")
-                        if tool then d.Tool.Visible = true; d.Tool.Text = tool.Name; d.Tool.Position = Vector2.new(x + w/2, y + h + 2) else d.Tool.Visible = false end
+                        if tool then d.Tool.Visible = true;
+                        d.Tool.Text = tool.Name; d.Tool.Position = Vector2.new(x + w/2, y + h + 2) else d.Tool.Visible = false end
                     else d.Tool.Visible = false end
                 end
             end
@@ -258,7 +270,7 @@ local uiLoader = loadstring(game:HttpGet('https://raw.githubusercontent.com/topi
 local ui = uiLoader({ rounding = true, theme = 'midnight', smoothDragging = true })
 local window = ui.newWindow({ text = ' Focus ', resize = true, size = Vector2.new(600, 450) })
 
--- > TAB 1: SILENT AIM (REPLACED COMBAT)
+-- > TAB 1: SILENT AIM
 local menuCombat = window:addMenu({ text = 'Silent Aim' })
 local sectSilent = menuCombat:addSection({ text = 'Main Settings', side = 'left' })
 
@@ -280,7 +292,6 @@ sectGun:addToggle({ text = 'Infinite Ammo', state = false }, function(v) Config.
 sectGun:addToggle({ text = 'Rapid Fire', state = false }, function(v) Config.Combat.RapidFire = v end)
 sectGun:addToggle({ text = 'No Recoil', state = false }, function(v) Config.Combat.NoRecoil = v end)
 sectGun:addButton({ text = 'Load Killaura' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/Killaurafist"))() end)
--- [[ INSTAKILLER RESTORED ]] --
 sectGun:addButton({ text = 'Load Instakiller' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/main/InstaKiller"))() end)
 
 -- > TAB 3: VISUALS (ESP)
@@ -358,6 +369,25 @@ local sectUtil = menuMisc:addSection({ text = 'Utility', side = 'right' })
 sectUtil:addToggle({ text = 'Cash Magnet', state = false }, function(v) Config.Misc.CashPickup = v end)
 sectUtil:addButton({ text = 'Inventory Viewer' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/inventoryviewer"))() end)
 
+-- > TAB 6: TELEPORTS (NEW)
+local menuTp = window:addMenu({ text = 'Teleports' })
+local sectTp = menuTp:addSection({ text = 'Locations', side = 'left' })
+
+local function TeleportTo(pos)
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        char.HumanoidRootPart.CFrame = CFrame.new(pos)
+    end
+end
+
+sectTp:addButton({ text = 'Sport Shop' }, function() TeleportTo(Vector3.new(-19, 4, -77)) end)
+sectTp:addButton({ text = 'Gun Store' }, function() TeleportTo(Vector3.new(39, 4, 370)) end)
+sectTp:addButton({ text = 'BankLog Bando' }, function() TeleportTo(Vector3.new(-195, 6, 255)) end)
+sectTp:addButton({ text = 'The Royale' }, function() TeleportTo(Vector3.new(-360, 5, 286)) end)
+sectTp:addButton({ text = 'Bank' }, function() TeleportTo(Vector3.new(-225, 4, 94)) end)
+sectTp:addButton({ text = 'Idea' }, function() TeleportTo(Vector3.new(298, 4, -195)) end)
+sectTp:addButton({ text = 'BlackMarket' }, function() TeleportTo(Vector3.new(259, 4, 428)) end)
+
 -- [[ 7. MAIN LOOPS ]] --
 RunService.RenderStepped:Connect(function()
     -- Silent Aim Logic (Visuals)
@@ -431,13 +461,22 @@ RunService.Heartbeat:Connect(function()
 end)
 
 UserInputService.InputBegan:Connect(function(i, g)
+    -- Re-added the UI Toggle functionality
+    if i.KeyCode == Enum.KeyCode.RightControl then
+        if window.Toggle then window:Toggle() 
+        elseif window.Main then window.Main.Visible = not window.Main.Visible 
+        end
+    end
+    
     if not g and MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode] = true end
 end)
+
 UserInputService.InputEnded:Connect(function(i)
     if MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode] = false end
 end)
 
-local oldIdx; oldIdx = hookmetamethod(game, "__newindex", function(t, k, v)
+local oldIdx;
+oldIdx = hookmetamethod(game, "__newindex", function(t, k, v)
     if Config.Misc.InfStamina and t.Name == "Stamina" and k == "Value" then return oldIdx(t, k, 100) end
     return oldIdx(t, k, v)
 end)
