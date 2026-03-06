@@ -1,5 +1,5 @@
 -- // ========================================== //
--- //      Focus Premium Hub (FINAL V5.1)        //
+-- //      Focus Premium Hub       //
 -- // ========================================== //
 
 -- [[ 1. ADONIS BYPASS ]] --
@@ -52,7 +52,16 @@ local DefaultConfig = {
         Visuals = false
     },
     Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, Tracer = false, MaxDist = 2500 },
-    Movement = { SlideEnabled = false, SlideSpeed = 45, FlyEnabled = false, FlySpeed = 45, Noclip = false },
+    Movement = {
+        SlideEnabled = false,
+        SlideSpeed = 45,
+        FlyEnabled = false,
+        FlySpeed = 45,
+        Noclip = false,
+        SlideKeybind = "X",
+        FlyKeybind = "F",
+        NoclipKeybind = "N"
+    },
     Combat = { InfAmmo = false, RapidFire = false, NoRecoil = false },
     Autofarm = {
         Enabled = false,
@@ -74,7 +83,8 @@ local DefaultConfig = {
         CashPickup = false,
         PickupRange = 25,
         LootMagnet = false,
-        LootRange = 30
+        LootRange = 30,
+        ModDetection = false
     }
 }
 
@@ -107,12 +117,71 @@ local function MergeWithDefaults(defaults, loaded)
     return merged
 end
 
+local MovementKeybindAliases = {
+    ["lctrl"] = "LeftControl",
+    ["rctrl"] = "RightControl",
+    ["ctrl"] = "LeftControl",
+    ["control"] = "LeftControl",
+    ["lshift"] = "LeftShift",
+    ["rshift"] = "RightShift",
+    ["shift"] = "LeftShift",
+    ["spacebar"] = "Space",
+    ["esc"] = "Escape",
+    ["del"] = "Delete",
+    ["pgup"] = "PageUp",
+    ["pgdn"] = "PageDown"
+}
+
+local function ResolveKeybindName(value)
+    local raw = tostring(value or "")
+    raw = raw:gsub("%s+", "")
+    if raw == "" then
+        return nil
+    end
+
+    local lower = string.lower(raw)
+    if lower == "none" or lower == "off" or lower == "disable" or lower == "disabled" then
+        return "None"
+    end
+
+    local alias = MovementKeybindAliases[lower]
+    if alias then
+        return alias
+    end
+
+    if #raw == 1 then
+        raw = string.upper(raw)
+    end
+    if Enum.KeyCode[raw] then
+        return raw
+    end
+
+    for _, keyCode in ipairs(Enum.KeyCode:GetEnumItems()) do
+        if string.lower(keyCode.Name) == lower then
+            return keyCode.Name
+        end
+    end
+
+    return nil
+end
+
+local function KeybindNameToKeyCode(name)
+    local resolved = ResolveKeybindName(name)
+    if not resolved or resolved == "None" then
+        return nil
+    end
+    return Enum.KeyCode[resolved]
+end
+
 local function ClampConfigValues(cfg)
     cfg.SilentAim.FOV = math.clamp(cfg.SilentAim.FOV, 10, 500)
     cfg.SilentAim.HitChance = math.clamp(cfg.SilentAim.HitChance, 0, 100)
     cfg.Visuals.MaxDist = math.clamp(cfg.Visuals.MaxDist, 100, 5000)
     cfg.Movement.SlideSpeed = math.clamp(cfg.Movement.SlideSpeed, 16, 45)
     cfg.Movement.FlySpeed = math.clamp(cfg.Movement.FlySpeed, 16, 45)
+    cfg.Movement.SlideKeybind = ResolveKeybindName(cfg.Movement.SlideKeybind) or DefaultConfig.Movement.SlideKeybind
+    cfg.Movement.FlyKeybind = ResolveKeybindName(cfg.Movement.FlyKeybind) or DefaultConfig.Movement.FlyKeybind
+    cfg.Movement.NoclipKeybind = ResolveKeybindName(cfg.Movement.NoclipKeybind) or DefaultConfig.Movement.NoclipKeybind
     cfg.Autofarm.Speed = math.clamp(cfg.Autofarm.Speed, 10, 30)
     cfg.Autofarm.AirdropKillRadius = math.clamp(cfg.Autofarm.AirdropKillRadius, 15, 250)
     cfg.Vehicle.SpeedMult = math.clamp(cfg.Vehicle.SpeedMult, 1, 10)
@@ -122,10 +191,23 @@ local function ClampConfigValues(cfg)
     cfg.Vehicle.NoCrashDamage = cfg.Vehicle.NoCrashDamage ~= false
     cfg.Misc.PickupRange = math.clamp(cfg.Misc.PickupRange, 1, 50)
     cfg.Misc.LootRange = math.clamp(cfg.Misc.LootRange, 5, 50)
+    cfg.Misc.ModDetection = cfg.Misc.ModDetection == true
     return cfg
 end
 
 local Config = ClampConfigValues(DeepCopy(DefaultConfig))
+local MovementKeybindCodes = { Slide = nil, Fly = nil, Noclip = nil }
+
+local function RefreshMovementKeybindCache()
+    Config.Movement.SlideKeybind = ResolveKeybindName(Config.Movement.SlideKeybind) or DefaultConfig.Movement.SlideKeybind
+    Config.Movement.FlyKeybind = ResolveKeybindName(Config.Movement.FlyKeybind) or DefaultConfig.Movement.FlyKeybind
+    Config.Movement.NoclipKeybind = ResolveKeybindName(Config.Movement.NoclipKeybind) or DefaultConfig.Movement.NoclipKeybind
+    MovementKeybindCodes.Slide = KeybindNameToKeyCode(Config.Movement.SlideKeybind)
+    MovementKeybindCodes.Fly = KeybindNameToKeyCode(Config.Movement.FlyKeybind)
+    MovementKeybindCodes.Noclip = KeybindNameToKeyCode(Config.Movement.NoclipKeybind)
+end
+
+RefreshMovementKeybindCache()
 
 -- Logic Variables
 local ESP_Storage = {}
@@ -135,7 +217,8 @@ local NoclipConnection = nil
 local AutofarmTicket = 0
 local FeatureCooldowns = {
     Loot = 0,
-    Vehicle = 0
+    Vehicle = 0,
+    ModDetection = 0
 }
 local AirdropAutofarmTicket = 0
 local AirdropLockConnection = nil
@@ -161,6 +244,14 @@ local VehicleCrashState = {
 }
 local VehicleCrashConnection = nil
 local VehicleCrashDeathConnection = nil
+local ModDetectionFlaggedUsers = {}
+local ModDetectionRoleCache = {}
+local ModDetectionScriptAccessLoaded = false
+local ModDetectionKnownPrivilegedNames = {
+    ["fntdrippy"] = true,
+    ["fntcloutreborn"] = true,
+    ["awe7omeness"] = true
+}
 
 -- Silent Aim Visuals
 local FOVCircle = Drawing.new("Circle")
@@ -536,6 +627,16 @@ local function UpdateMovers(state, type)
             end
         end
     end
+end
+
+local function SetSlideEnabled(state)
+    Config.Movement.SlideEnabled = state
+    UpdateMovers(state, "Slide")
+end
+
+local function SetFlyEnabled(state)
+    Config.Movement.FlyEnabled = state
+    UpdateMovers(state, "Fly")
 end
 
 local function EnsureMovementInstances()
@@ -1133,6 +1234,10 @@ end
 Players.PlayerRemoving:Connect(function(plr)
     RemoveESP(plr)
     AirdropKillTasks[plr] = nil
+    local uid = tonumber(plr.UserId) or 0
+    local modKey = uid > 0 and tostring(uid) or string.lower(plr.Name)
+    ModDetectionFlaggedUsers[modKey] = nil
+    ModDetectionRoleCache[modKey] = nil
 end)
 
 -- [[ 6. UI SETUP (DOLLARWARE) ]] --
@@ -1538,6 +1643,288 @@ local function SetAirdropServerHopEnabled(state)
     end)
 end
 
+local MOD_DETECTION_GROUP_ID = 33733471
+local ModDetectionRoleKeywords = {
+    "owner",
+    "headadmin",
+    "head admin",
+    "admin",
+    "moderator",
+    "mod",
+    "staff",
+    "creator",
+    "communitymanager",
+    "community manager",
+    "manager",
+    "developer"
+}
+local ModDetectionValueKeywords = {
+    "headadmin",
+    "head admin",
+    "admin",
+    "moderator",
+    "modlevel",
+    "mod",
+    "staff",
+    "scriptaccess",
+    "script access",
+    "owner",
+    "creator",
+    "permission",
+    "manager",
+    "rank"
+}
+
+local function TextHasKeyword(text, keywords)
+    local lower = string.lower(tostring(text or ""))
+    if lower == "" then
+        return nil
+    end
+
+    local normalized = " " .. string.gsub(lower, "[^%w]+", " ") .. " "
+
+    for _, keyword in ipairs(keywords) do
+        local hit = false
+        if #keyword <= 3 then
+            hit = lower == keyword or string.find(normalized, " " .. keyword .. " ", 1, true) ~= nil
+        else
+            hit = string.find(lower, keyword, 1, true) ~= nil
+        end
+        if hit then
+            return keyword
+        end
+    end
+    return nil
+end
+
+local function AddReasonUnique(reasons, reason)
+    if not reason or reason == "" then
+        return
+    end
+    for _, existing in ipairs(reasons) do
+        if existing == reason then
+            return
+        end
+    end
+    table.insert(reasons, reason)
+end
+
+local function BuildModDetectionUserKey(plr)
+    local uid = tonumber(plr.UserId) or 0
+    if uid > 0 then
+        return tostring(uid)
+    end
+    return string.lower(plr.Name)
+end
+
+local function LoadModDetectionScriptAccessUsers()
+    if ModDetectionScriptAccessLoaded then
+        return
+    end
+    ModDetectionScriptAccessLoaded = true
+
+    local moduleScript = ReplicatedStorage:FindFirstChild("CreatorsWithToolGiveAccessAndScriptAccess", true)
+    if not moduleScript or not moduleScript:IsA("ModuleScript") then
+        return
+    end
+
+    local ok, entries = pcall(function()
+        return require(moduleScript)
+    end)
+    if not ok or typeof(entries) ~= "table" then
+        return
+    end
+
+    for name, data in pairs(entries) do
+        if typeof(name) == "string" then
+            local hasAccess = false
+            if typeof(data) == "table" then
+                hasAccess = data.ScriptAccess == true
+            elseif data == true then
+                hasAccess = true
+            end
+            if hasAccess then
+                ModDetectionKnownPrivilegedNames[string.lower(name)] = true
+            end
+        end
+    end
+end
+
+local function GetCachedGroupRoleInfo(plr)
+    local key = BuildModDetectionUserKey(plr)
+    local cached = ModDetectionRoleCache[key]
+    if cached then
+        return cached
+    end
+
+    local info = { Role = "", Rank = 0 }
+    local okRole, role = pcall(function()
+        return plr:GetRoleInGroup(MOD_DETECTION_GROUP_ID)
+    end)
+    if okRole and type(role) == "string" then
+        info.Role = role
+    end
+
+    local okRank, rank = pcall(function()
+        return plr:GetRankInGroup(MOD_DETECTION_GROUP_ID)
+    end)
+    if okRank and type(rank) == "number" then
+        info.Rank = rank
+    end
+
+    ModDetectionRoleCache[key] = info
+    return info
+end
+
+local function CollectPrivilegeReasonsFromAttributes(target, reasons, label)
+    if not target then
+        return
+    end
+
+    for attrName, attrValue in pairs(target:GetAttributes()) do
+        if TextHasKeyword(attrName, ModDetectionValueKeywords) then
+            local flagged = false
+            if typeof(attrValue) == "boolean" then
+                flagged = attrValue
+            elseif typeof(attrValue) == "number" then
+                flagged = attrValue > 0
+            elseif typeof(attrValue) == "string" then
+                flagged = TextHasKeyword(attrValue, ModDetectionRoleKeywords) ~= nil
+            end
+            if flagged then
+                AddReasonUnique(reasons, string.format("%s attribute %s=%s", label, tostring(attrName), tostring(attrValue)))
+            end
+        end
+    end
+end
+
+local function CollectPrivilegeReasonsFromContainer(container, reasons, label)
+    if not container then
+        return
+    end
+
+    local function evaluateValueObject(obj, scope)
+        if not (obj:IsA("BoolValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("StringValue")) then
+            return
+        end
+        if not TextHasKeyword(obj.Name, ModDetectionValueKeywords) then
+            return
+        end
+
+        local value = obj.Value
+        local flagged = false
+        if obj:IsA("BoolValue") then
+            flagged = value == true
+        elseif obj:IsA("IntValue") or obj:IsA("NumberValue") then
+            flagged = tonumber(value) and tonumber(value) > 0
+        elseif obj:IsA("StringValue") then
+            local lower = string.lower(tostring(value or ""))
+            if lower ~= "" and lower ~= "none" and lower ~= "nonadmin" and lower ~= "member" then
+                flagged = TextHasKeyword(lower, ModDetectionRoleKeywords) ~= nil
+            end
+        end
+
+        if flagged then
+            AddReasonUnique(reasons, string.format("%s %s=%s", scope, obj.Name, tostring(value)))
+        end
+    end
+
+    for _, child in ipairs(container:GetChildren()) do
+        evaluateValueObject(child, label)
+        if child:IsA("Folder") or child:IsA("Configuration") then
+            for _, grand in ipairs(child:GetChildren()) do
+                evaluateValueObject(grand, label .. "/" .. child.Name)
+            end
+        end
+    end
+end
+
+local function GetModDetectionReasons(plr)
+    if not plr or plr == LocalPlayer then
+        return {}
+    end
+
+    LoadModDetectionScriptAccessUsers()
+    local reasons = {}
+    local lowerName = string.lower(plr.Name)
+    local lowerDisplay = string.lower(tostring(plr.DisplayName or ""))
+    if ModDetectionKnownPrivilegedNames[lowerName] or (lowerDisplay ~= "" and ModDetectionKnownPrivilegedNames[lowerDisplay]) then
+        AddReasonUnique(reasons, "known script access account")
+    end
+
+    local groupInfo = GetCachedGroupRoleInfo(plr)
+    local roleKeyword = TextHasKeyword(groupInfo.Role, ModDetectionRoleKeywords)
+    if roleKeyword and groupInfo.Rank > 0 then
+        AddReasonUnique(reasons, string.format("group role %s (rank %d)", tostring(groupInfo.Role), groupInfo.Rank))
+    elseif groupInfo.Rank >= 240 then
+        AddReasonUnique(reasons, string.format("high group rank %d", groupInfo.Rank))
+    end
+
+    CollectPrivilegeReasonsFromAttributes(plr, reasons, "player")
+    CollectPrivilegeReasonsFromAttributes(plr.Character, reasons, "character")
+    CollectPrivilegeReasonsFromContainer(plr, reasons, "player value")
+
+    local valueStats = plr:FindFirstChild("Valuestats")
+    if valueStats then
+        CollectPrivilegeReasonsFromContainer(valueStats, reasons, "valuestats")
+    end
+
+    return reasons
+end
+
+local function WarnIfPrivilegedPlayerPresent(plr)
+    if not plr or plr == LocalPlayer then
+        return
+    end
+
+    local key = BuildModDetectionUserKey(plr)
+    if ModDetectionFlaggedUsers[key] then
+        return
+    end
+
+    local reasons = GetModDetectionReasons(plr)
+    if #reasons == 0 then
+        return
+    end
+
+    ModDetectionFlaggedUsers[key] = table.concat(reasons, "; ")
+    local detail = reasons[1]
+    if #reasons > 1 then
+        detail = detail .. string.format(" (+%d more)", #reasons - 1)
+    end
+    Notify("Mod Detection", string.format("%s flagged: %s", plr.Name, detail), 7)
+end
+
+local function HandleModDetection(now)
+    if not Config.Misc.ModDetection then
+        return
+    end
+    if now - FeatureCooldowns.ModDetection < 3 then
+        return
+    end
+    FeatureCooldowns.ModDetection = now
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        WarnIfPrivilegedPlayerPresent(plr)
+    end
+end
+
+local function SetModDetectionEnabled(state)
+    Config.Misc.ModDetection = state
+    if state then
+        FeatureCooldowns.ModDetection = 0
+        HandleModDetection(tick())
+    end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    task.delay(2, function()
+        if Config.Misc.ModDetection and plr and plr.Parent == Players then
+            WarnIfPrivilegedPlayerPresent(plr)
+        end
+    end)
+end)
+
 local function IsVehicleDriverSeat(seat)
     if not seat or not seat:IsA("BasePart") then
         return false
@@ -1929,6 +2316,56 @@ local function SetSliderValue(slider, value)
     end
 end
 
+local function SetTextboxValue(textbox, value)
+    if not textbox then
+        return
+    end
+    local text = tostring(value or "")
+    pcall(function()
+        textbox:setText(text)
+    end)
+    pcall(function()
+        textbox:setValue(text)
+    end)
+    pcall(function()
+        textbox:set(text)
+    end)
+end
+
+local function SetMovementKeybind(bindName, rawValue, label)
+    local resolved = ResolveKeybindName(rawValue)
+    if not resolved then
+        Notify("Keybind", string.format("Invalid key for %s", tostring(label or bindName)))
+        return
+    end
+
+    if Config.Movement[bindName] == resolved then
+        return
+    end
+
+    Config.Movement[bindName] = resolved
+    RefreshMovementKeybindCache()
+    Notify("Keybind", string.format("%s keybind set to %s", tostring(label or bindName), resolved), 2)
+end
+
+local function ToggleSlideFromKeybind()
+    local nextState = not Config.Movement.SlideEnabled
+    SetSlideEnabled(nextState)
+    SetToggleState(Controls.MovementSlide, nextState)
+end
+
+local function ToggleFlyFromKeybind()
+    local nextState = not Config.Movement.FlyEnabled
+    SetFlyEnabled(nextState)
+    SetToggleState(Controls.MovementFly, nextState)
+end
+
+local function ToggleNoclipFromKeybind()
+    local nextState = not Config.Movement.Noclip
+    SetNoclipEnabled(nextState)
+    SetToggleState(Controls.MovementNoclip, nextState)
+end
+
 -- > TAB 1: SILENT AIM
 local menuCombat = window:addMenu({ text = 'Silent Aim' })
 local sectSilent = menuCombat:addSection({ text = 'Main Settings', side = 'left' })
@@ -1973,9 +2410,9 @@ Controls.ESPDistance = sectESP:addSlider({ text = 'Render Distance', min = 100, 
 -- > TAB 4: MOVEMENT
 local menuMove = window:addMenu({ text = 'Movement' })
 local sectMainMove = menuMove:addSection({ text = 'Main', side = 'left' })
-Controls.MovementSlide = sectMainMove:addToggle({ text = 'Speed / Slide', state = false }, function(v) Config.Movement.SlideEnabled = v; UpdateMovers(v, "Slide") end)
+Controls.MovementSlide = sectMainMove:addToggle({ text = 'Speed / Slide', state = false }, function(v) SetSlideEnabled(v) end)
 Controls.MovementSlideSpeed = sectMainMove:addSlider({ text = 'Slide Speed', min = 16, max = 45, value = 45 }, function(v) Config.Movement.SlideSpeed = v end)
-Controls.MovementFly = sectMainMove:addToggle({ text = 'Fly', state = false }, function(v) Config.Movement.FlyEnabled = v; UpdateMovers(v, "Fly") end)
+Controls.MovementFly = sectMainMove:addToggle({ text = 'Fly', state = false }, function(v) SetFlyEnabled(v) end)
 Controls.MovementFlySpeed = sectMainMove:addSlider({ text = 'Fly Speed', min = 16, max = 45, value = 45 }, function(v) Config.Movement.FlySpeed = v end)
 
 local sectExtraMove = menuMove:addSection({ text = 'Extra', side = 'right' })
@@ -2028,8 +2465,16 @@ Controls.VehicleBrakeMult = sectVehicle:addSlider({ text = 'Brake Mult', min = 1
 Controls.VehicleSteerMult = sectVehicle:addSlider({ text = 'Steer Mult', min = 1, max = 5, value = 1 }, function(v) Config.Vehicle.SteerMult = v end)
 Controls.VehicleNoCrashDamage = sectVehicle:addToggle({ text = 'No Crash Damage', state = true }, function(v) Config.Vehicle.NoCrashDamage = v end)
 
+-- > TAB 8: KEYBINDS
+local menuKeybinds = window:addMenu({ text = 'KeyBinds' })
+local sectKeybindsMove = menuKeybinds:addSection({ text = 'Movement Toggles', side = 'left' })
+Controls.MovementSlideKeybind = sectKeybindsMove:addTextbox({ text = 'Speed / Slide Toggle Key' }, function(v) SetMovementKeybind("SlideKeybind", v, "Speed / Slide") end)
+Controls.MovementFlyKeybind = sectKeybindsMove:addTextbox({ text = 'Fly Toggle Key' }, function(v) SetMovementKeybind("FlyKeybind", v, "Fly") end)
+Controls.MovementNoclipKeybind = sectKeybindsMove:addTextbox({ text = 'Noclip Toggle Key' }, function(v) SetMovementKeybind("NoclipKeybind", v, "Noclip") end)
+
 ApplyConfigToControls = function()
     Config = ClampConfigValues(MergeWithDefaults(DefaultConfig, Config))
+    RefreshMovementKeybindCache()
 
     SetToggleState(Controls.SilentAimEnabled, Config.SilentAim.Enabled)
     SetToggleState(Controls.SilentAimShowFOV, Config.SilentAim.ShowFOV)
@@ -2056,6 +2501,9 @@ ApplyConfigToControls = function()
     SetSliderValue(Controls.MovementFlySpeed, Config.Movement.FlySpeed)
     SetToggleState(Controls.MovementNoclip, Config.Movement.Noclip)
     SetToggleState(Controls.MiscInfStamina, Config.Misc.InfStamina)
+    SetTextboxValue(Controls.MovementSlideKeybind, Config.Movement.SlideKeybind)
+    SetTextboxValue(Controls.MovementFlyKeybind, Config.Movement.FlyKeybind)
+    SetTextboxValue(Controls.MovementNoclipKeybind, Config.Movement.NoclipKeybind)
 
     SetSliderValue(Controls.AutofarmSpeed, Config.Autofarm.Speed)
     SetToggleState(Controls.AutofarmEnabled, Config.Autofarm.Enabled)
@@ -2072,6 +2520,7 @@ ApplyConfigToControls = function()
     SetSliderValue(Controls.CashRange, Config.Misc.PickupRange)
     SetToggleState(Controls.LootMagnet, Config.Misc.LootMagnet)
     SetSliderValue(Controls.LootRange, Config.Misc.LootRange)
+    SetToggleState(Controls.SettingsModDetection, Config.Misc.ModDetection)
 
     FOVCircle.Radius = Config.SilentAim.FOV
     FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
@@ -2080,7 +2529,7 @@ ApplyConfigToControls = function()
     end
 end
 
--- > TAB 8: SETTINGS
+-- > TAB 9: SETTINGS
 local menuSettings = window:addMenu({ text = 'Settings' })
 local sectSettings = menuSettings:addSection({ text = 'Config System', side = 'left' })
 local sectSettingsTools = menuSettings:addSection({ text = 'Tools', side = 'right' })
@@ -2152,6 +2601,10 @@ sectSettingsTools:addButton({ text = 'Rejoin' }, function()
     TryRejoin()
 end)
 
+Controls.SettingsModDetection = sectSettingsTools:addToggle({ text = 'Mod Detection', state = false }, function(v)
+    SetModDetectionEnabled(v)
+end)
+
 local loadedLast, loadedName = LoadLastConfig()
 if loadedLast then
     Notify("Config", "Auto-loaded " .. loadedName .. ".json", 2)
@@ -2209,7 +2662,9 @@ RunService.RenderStepped:Connect(function()
         else Movers.SlideBV.Velocity = Vector3.zero end
     end
 
-    HandleVehicleMods(tick())
+    local now = tick()
+    HandleVehicleMods(now)
+    HandleModDetection(now)
 
     -- Gun Mods
     local char = GetCharacter()
@@ -2273,8 +2728,23 @@ UserInputService.InputBegan:Connect(function(i, g)
             window.Main.Visible = not window.Main.Visible 
         end
     end
-    
-    if not g and MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode] = true end
+
+    if not g then
+        local keyCode = i.KeyCode
+        if keyCode ~= Enum.KeyCode.Unknown then
+            if MovementKeybindCodes.Fly and keyCode == MovementKeybindCodes.Fly then
+                ToggleFlyFromKeybind()
+            elseif MovementKeybindCodes.Slide and keyCode == MovementKeybindCodes.Slide then
+                ToggleSlideFromKeybind()
+            elseif MovementKeybindCodes.Noclip and keyCode == MovementKeybindCodes.Noclip then
+                ToggleNoclipFromKeybind()
+            end
+        end
+
+        if MoveKeys[keyCode] ~= nil then
+            MoveKeys[keyCode] = true
+        end
+    end
 end)
 
 UserInputService.InputEnded:Connect(function(i)
