@@ -36,6 +36,7 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
@@ -50,11 +51,31 @@ local DefaultConfig = {
         WallCheck = true,
         Visuals = false
     },
-    Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, MaxDist = 2500 },
+    Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, Tracer = false, MaxDist = 2500 },
     Movement = { SlideEnabled = false, SlideSpeed = 45, FlyEnabled = false, FlySpeed = 45, Noclip = false },
     Combat = { InfAmmo = false, RapidFire = false, NoRecoil = false },
-    Autofarm = { Enabled = false, Speed = 30 },
-    Misc = { InfStamina = false, CashPickup = false, PickupRange = 25 }
+    Autofarm = {
+        Enabled = false,
+        Speed = 30,
+        AirdropEnabled = false,
+        AirdropKillRadius = 75,
+        AirdropServerHopEnabled = false
+    },
+    Vehicle = {
+        Enabled = false,
+        SpeedMult = 1,
+        AccelMult = 1,
+        BrakeMult = 1,
+        SteerMult = 1,
+        NoCrashDamage = true
+    },
+    Misc = {
+        InfStamina = false,
+        CashPickup = false,
+        PickupRange = 25,
+        LootMagnet = false,
+        LootRange = 30
+    }
 }
 
 local function DeepCopy(source)
@@ -93,7 +114,14 @@ local function ClampConfigValues(cfg)
     cfg.Movement.SlideSpeed = math.clamp(cfg.Movement.SlideSpeed, 16, 45)
     cfg.Movement.FlySpeed = math.clamp(cfg.Movement.FlySpeed, 16, 45)
     cfg.Autofarm.Speed = math.clamp(cfg.Autofarm.Speed, 10, 30)
-    cfg.Misc.PickupRange = math.clamp(cfg.Misc.PickupRange, 1, 250)
+    cfg.Autofarm.AirdropKillRadius = math.clamp(cfg.Autofarm.AirdropKillRadius, 15, 250)
+    cfg.Vehicle.SpeedMult = math.clamp(cfg.Vehicle.SpeedMult, 1, 10)
+    cfg.Vehicle.AccelMult = math.clamp(cfg.Vehicle.AccelMult, 1, 5)
+    cfg.Vehicle.BrakeMult = math.clamp(cfg.Vehicle.BrakeMult, 1, 5)
+    cfg.Vehicle.SteerMult = math.clamp(cfg.Vehicle.SteerMult, 1, 5)
+    cfg.Vehicle.NoCrashDamage = cfg.Vehicle.NoCrashDamage ~= false
+    cfg.Misc.PickupRange = math.clamp(cfg.Misc.PickupRange, 1, 50)
+    cfg.Misc.LootRange = math.clamp(cfg.Misc.LootRange, 5, 50)
     return cfg
 end
 
@@ -105,6 +133,34 @@ local Movers = { SlideBV = nil, SlideBG = nil, FlyBV = nil, FlyBG = nil }
 local MoveKeys = {[Enum.KeyCode.W]=false, [Enum.KeyCode.A]=false, [Enum.KeyCode.S]=false, [Enum.KeyCode.D]=false}
 local NoclipConnection = nil
 local AutofarmTicket = 0
+local FeatureCooldowns = {
+    Loot = 0,
+    Vehicle = 0
+}
+local AirdropAutofarmTicket = 0
+local AirdropLockConnection = nil
+local LockedAirdropPart = nil
+local AirdropKillTasks = {}
+local LastAirdropPromptTick = 0
+local LastAirdropLootSweepTick = 0
+local AirdropServerHopTicket = 0
+local AirdropServerHopBusy = false
+local AirdropKillActiveCount = 0
+local LootClientSessionActive = false
+local VehicleModsActive = false
+local VehicleOriginalValueObjects = {}
+local VehicleOriginalAttributes = {}
+local VehicleOriginalSeatProperties = {}
+local VehicleCrashState = {
+    Seat = nil,
+    Humanoid = nil,
+    OriginalBreakJointsOnDeath = nil,
+    LastTick = 0,
+    LastSpeed = 0,
+    LastHealth = 0
+}
+local VehicleCrashConnection = nil
+local VehicleCrashDeathConnection = nil
 
 -- Silent Aim Visuals
 local FOVCircle = Drawing.new("Circle")
@@ -575,6 +631,423 @@ local function SetAutofarmEnabled(state)
     end
 end
 
+local function TriggerPrompt(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Enabled then
+        return false
+    end
+
+    local oldHold = prompt.HoldDuration
+    local oldLineOfSight = prompt.RequiresLineOfSight
+    local fired = false
+    pcall(function()
+        prompt.HoldDuration = 0
+        prompt.RequiresLineOfSight = false
+    end)
+    local ok = pcall(function()
+        fireproximityprompt(prompt, 1, true)
+    end)
+    if ok then
+        fired = true
+    end
+    if not fired then
+        ok = pcall(function()
+            fireproximityprompt(prompt, 0, true)
+        end)
+        if ok then
+            fired = true
+        end
+    end
+    if not fired then
+        ok = pcall(function()
+            fireproximityprompt(prompt)
+        end)
+        if ok then
+            fired = true
+        end
+    end
+    pcall(function()
+        prompt.HoldDuration = oldHold
+        prompt.RequiresLineOfSight = oldLineOfSight
+    end)
+    return fired
+end
+
+local function GetInstanceBasePart(obj)
+    if not obj then
+        return nil
+    end
+    if obj:IsA("BasePart") then
+        return obj
+    end
+    if obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return obj:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function GetPromptActivationPosition(prompt)
+    if not prompt then
+        return nil
+    end
+
+    local parent = prompt.Parent
+    if parent and parent:IsA("BasePart") then
+        return parent.Position
+    end
+
+    local ancestorPart = prompt:FindFirstAncestorWhichIsA("BasePart")
+    if ancestorPart then
+        return ancestorPart.Position
+    end
+
+    if parent and parent:IsA("Model") then
+        local part = parent.PrimaryPart or parent:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            return part.Position
+        end
+    end
+
+    return nil
+end
+
+local function SnapRootToPosition(position, lookAtPosition)
+    local hum, root = GetHumanoidAndRoot(GetCharacter())
+    if not hum or hum.Health <= 0 or not root then
+        return
+    end
+
+    local standPos = position + Vector3.new(0, 2.5, 0)
+    root.CFrame = CFrame.lookAt(standPos, lookAtPosition or position)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+end
+
+local function TriggerPromptAtPosition(prompt, position)
+    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Enabled then
+        return false
+    end
+
+    if position then
+        SnapRootToPosition(position, position)
+    end
+    return TriggerPrompt(prompt)
+end
+
+local function TriggerPromptsInContainerNear(container, centerPosition, radius, excludedRoot)
+    if not container then
+        return 0
+    end
+
+    local triggered = 0
+    for _, desc in ipairs(container:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled and (not excludedRoot or not desc:IsDescendantOf(excludedRoot)) then
+            local pos = GetPromptActivationPosition(desc)
+            if pos and (pos - centerPosition).Magnitude <= radius then
+                if TriggerPromptAtPosition(desc, pos) then
+                    triggered += 1
+                end
+            end
+        end
+    end
+    return triggered
+end
+
+local function BindLootClientSessionState()
+    local lootRemote = ReplicatedStorage:FindFirstChild("LootClient")
+    if not lootRemote then
+        local ok, waited = pcall(function()
+            return ReplicatedStorage:WaitForChild("LootClient", 10)
+        end)
+        if ok then
+            lootRemote = waited
+        end
+    end
+
+    if lootRemote and lootRemote:IsA("RemoteEvent") then
+        lootRemote.OnClientEvent:Connect(function(state)
+            LootClientSessionActive = state == true
+        end)
+    end
+end
+
+local function IsLootSessionActive()
+    if LootClientSessionActive then
+        return true
+    end
+    local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    return playerGui and playerGui:FindFirstChild("LootUI") ~= nil
+end
+
+BindLootClientSessionState()
+
+local function GetAirdropData()
+    local eventDebris = Workspace:FindFirstChild("EventDebris")
+    if not eventDebris then
+        return nil, nil, nil
+    end
+
+    local airdrop = eventDebris:FindFirstChild("Airdrop")
+    if not airdrop then
+        return nil, nil, nil
+    end
+
+    local part = GetInstanceBasePart(airdrop)
+    local prompt = airdrop:FindFirstChildWhichIsA("ProximityPrompt", true)
+    return airdrop, part, prompt
+end
+
+local function DisconnectAirdropLock()
+    if AirdropLockConnection then
+        AirdropLockConnection:Disconnect()
+        AirdropLockConnection = nil
+    end
+    LockedAirdropPart = nil
+end
+
+local function SetAirdropLockPart(part)
+    if LockedAirdropPart == part and AirdropLockConnection then
+        return
+    end
+
+    DisconnectAirdropLock()
+    LockedAirdropPart = part
+    if not part then
+        return
+    end
+
+    AirdropLockConnection = RunService.RenderStepped:Connect(function()
+        if not Config.Autofarm.AirdropEnabled then
+            DisconnectAirdropLock()
+            return
+        end
+        if not LockedAirdropPart or not LockedAirdropPart.Parent then
+            DisconnectAirdropLock()
+            return
+        end
+        if AirdropKillActiveCount > 0 then
+            return
+        end
+
+        local hum, root = GetHumanoidAndRoot(GetCharacter())
+        if not hum or not root or hum.Health <= 0 then
+            return
+        end
+
+        local holdPosition = LockedAirdropPart.Position + Vector3.new(0, 3, 0)
+        root.CFrame = CFrame.lookAt(holdPosition, LockedAirdropPart.Position)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+local function EquipBestGun()
+    local char = GetCharacter()
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not char or not hum then
+        return nil
+    end
+
+    local equipped = char:FindFirstChildWhichIsA("Tool")
+    if equipped and equipped:FindFirstChild("Stats") then
+        return equipped
+    end
+
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool:FindFirstChild("Stats") then
+                pcall(function()
+                    hum:EquipTool(tool)
+                end)
+                task.wait()
+                local afterEquip = char:FindFirstChildWhichIsA("Tool")
+                if afterEquip and afterEquip:FindFirstChild("Stats") then
+                    return afterEquip
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function InstaKillMagDumpTarget(targetPlayer)
+    local gunRemotes = ReplicatedStorage:FindFirstChild("GunRemotes")
+    local fireRemote = gunRemotes and gunRemotes:FindFirstChild("Fire")
+    local impactRemote = gunRemotes and gunRemotes:FindFirstChild("Impact")
+    if not fireRemote or not impactRemote then
+        return
+    end
+
+    local weapon = EquipBestGun()
+    if not weapon then
+        return
+    end
+
+    local targetChar = targetPlayer.Character
+    local targetHum, targetRoot = GetHumanoidAndRoot(targetChar)
+    local targetHead = targetChar and targetChar:FindFirstChild("Head")
+    if not targetHum or targetHum.Health <= 0 or not targetHead or not targetRoot then
+        return
+    end
+
+    local _, myRoot = GetHumanoidAndRoot(GetCharacter())
+    if not myRoot then
+        return
+    end
+
+    local attachOffset = CFrame.new(0, 0, 3)
+    for _ = 1, 10 do
+        if not Config.Autofarm.AirdropEnabled then
+            return
+        end
+
+        _, myRoot = GetHumanoidAndRoot(GetCharacter())
+        if not myRoot then
+            return
+        end
+
+        targetChar = targetPlayer.Character
+        targetHum, targetRoot = GetHumanoidAndRoot(targetChar)
+        targetHead = targetChar and targetChar:FindFirstChild("Head")
+        if not targetHum or targetHum.Health <= 0 or not targetHead or not targetRoot then
+            return
+        end
+
+        local lockPos = targetRoot.CFrame * attachOffset
+        myRoot.CFrame = CFrame.lookAt(lockPos.Position, targetRoot.Position)
+        myRoot.AssemblyLinearVelocity = Vector3.zero
+        myRoot.AssemblyAngularVelocity = Vector3.zero
+
+        local dir = targetHead.Position - myRoot.Position
+        if dir.Magnitude <= 0 then
+            dir = Vector3.new(0, 1, 0)
+        end
+
+        pcall(function()
+            fireRemote:FireServer()
+        end)
+        pcall(function()
+            impactRemote:FireServer(targetHead, targetHead.Position, dir.Unit, Vector3.new(0, 1, 0), false, nil, nil)
+        end)
+        task.wait(0.05)
+    end
+end
+
+local function QueueAirdropKill(targetPlayer)
+    if AirdropKillTasks[targetPlayer] then
+        return
+    end
+
+    AirdropKillTasks[targetPlayer] = true
+    task.spawn(function()
+        AirdropKillActiveCount += 1
+        pcall(function()
+            InstaKillMagDumpTarget(targetPlayer)
+        end)
+        AirdropKillActiveCount = math.max(0, AirdropKillActiveCount - 1)
+        task.wait(0.05)
+        AirdropKillTasks[targetPlayer] = nil
+    end)
+end
+
+local function HandleAirdropAutofarmStep()
+    local airdropObj, airdropPart, lootPrompt = GetAirdropData()
+    if not airdropPart then
+        DisconnectAirdropLock()
+        return
+    end
+
+    SetAirdropLockPart(airdropPart)
+    local airdropPosition = airdropPart.Position
+    local now = tick()
+    local lootSessionActive = IsLootSessionActive()
+
+    if not lootSessionActive and now - LastAirdropPromptTick >= 0.85 then
+        LastAirdropPromptTick = now
+        local opened = false
+
+        if lootPrompt and lootPrompt.Enabled then
+            opened = TriggerPromptAtPosition(lootPrompt, airdropPosition)
+        end
+
+        if not opened then
+            TriggerPromptsInContainerNear(airdropObj, airdropPosition, 25)
+        end
+    end
+
+    if now - LastAirdropLootSweepTick >= (lootSessionActive and 0.18 or 0.30) then
+        LastAirdropLootSweepTick = now
+        local lootRadius = math.max(Config.Misc.LootRange, 35)
+        TriggerPromptsInContainerNear(Workspace:FindFirstChild("EventDebris"), airdropPosition, lootRadius, airdropObj)
+        TriggerPromptsInContainerNear(Workspace:FindFirstChild("Lootables"), airdropPosition, lootRadius)
+        TriggerPromptsInContainerNear(Workspace:FindFirstChild("OBJECTS"), airdropPosition, lootRadius)
+    end
+
+    local radius = Config.Autofarm.AirdropKillRadius
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local hum, root = GetHumanoidAndRoot(player.Character)
+            if hum and hum.Health > 0 and root and (root.Position - airdropPosition).Magnitude <= radius then
+                QueueAirdropKill(player)
+            end
+        end
+    end
+end
+
+local function StartAirdropAutofarm()
+    AirdropAutofarmTicket += 1
+    local ticket = AirdropAutofarmTicket
+    task.spawn(function()
+        while Config.Autofarm.AirdropEnabled and AirdropAutofarmTicket == ticket do
+            HandleAirdropAutofarmStep()
+            task.wait(0.05)
+        end
+        DisconnectAirdropLock()
+    end)
+end
+
+local function SetAirdropAutofarmEnabled(state)
+    Config.Autofarm.AirdropEnabled = state
+    if state then
+        LootClientSessionActive = false
+        LastAirdropPromptTick = 0
+        LastAirdropLootSweepTick = 0
+        StartAirdropAutofarm()
+    else
+        LootClientSessionActive = false
+        AirdropAutofarmTicket += 1
+        DisconnectAirdropLock()
+    end
+end
+
+local function HandleLootMagnet()
+    local _, root = GetHumanoidAndRoot(GetCharacter())
+    if not root then
+        return
+    end
+
+    local range = Config.Misc.LootRange
+    local function Scan(container)
+        if not container then
+            return
+        end
+
+        for _, item in ipairs(container:GetChildren()) do
+            local part = item:IsA("BasePart") and item or (item:IsA("Model") and (item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)) or nil)
+            if part and (part.Position - root.Position).Magnitude <= range then
+                local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if prompt then
+                    TriggerPrompt(prompt)
+                end
+            end
+        end
+    end
+
+    Scan(Workspace:FindFirstChild("Lootables"))
+    Scan(Workspace:FindFirstChild("OBJECTS"))
+end
+
 -- [[ 5. ESP LOGIC ]] --
 local function CreateDrawing(t, p) local d = Drawing.new(t);
 for k,v in pairs(p) do d[k]=v end; return d end
@@ -608,7 +1081,8 @@ local function HandleESP()
                     Box = CreateDrawing("Square", {Thickness=1, Color=Color3.new(1,1,1), Filled=false}),
                     Name = CreateDrawing("Text", {Size=13, Center=true, Outline=true, Color=Color3.new(1,1,1)}),
                     Bar = CreateDrawing("Square", {Filled=true}),
-                    Tool = CreateDrawing("Text", {Size=12, Center=true, Outline=true, Color=Color3.new(0.8,0.8,1)})
+                    Tool = CreateDrawing("Text", {Size=12, Center=true, Outline=true, Color=Color3.new(0.8,0.8,1)}),
+                    Tracer = CreateDrawing("Line", {Thickness=1, Color=Color3.new(1,1,1), Transparency=1})
                 }
             end
 
@@ -641,6 +1115,14 @@ local function HandleESP()
                         if tool then d.Tool.Visible = true;
                         d.Tool.Text = tool.Name; d.Tool.Position = Vector2.new(x + w/2, y + h + 2) else d.Tool.Visible = false end
                     else d.Tool.Visible = false end
+
+                    if Config.Visuals.Tracer then
+                        d.Tracer.Visible = true
+                        d.Tracer.From = Vector2.new(cam.ViewportSize.X * 0.5, cam.ViewportSize.Y)
+                        d.Tracer.To = Vector2.new(pos.X, pos.Y)
+                    else
+                        d.Tracer.Visible = false
+                    end
                 end
             end
             if not show then for _, o in pairs(d) do o.Visible = false end end
@@ -648,7 +1130,10 @@ local function HandleESP()
     end
 end
 
-Players.PlayerRemoving:Connect(RemoveESP)
+Players.PlayerRemoving:Connect(function(plr)
+    RemoveESP(plr)
+    AirdropKillTasks[plr] = nil
+end)
 
 -- [[ 6. UI SETUP (DOLLARWARE) ]] --
 local uiLoader = loadstring(game:HttpGet('https://raw.githubusercontent.com/topitbopit/dollarware/main/library.lua'))
@@ -658,6 +1143,768 @@ local window = ui.newWindow({ text = ' Focus ', resize = true, size = Vector2.ne
 local function Notify(title, message, duration)
     ui.notify({ title = title, message = message, duration = duration or 3 })
     print(string.format("[Focus] %s: %s", tostring(title), tostring(message)))
+end
+
+local function TryRejoin()
+    Notify("Rejoin", "Teleporting to a fresh session...")
+    local ok, err = pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+    if not ok then
+        Notify("Rejoin Failed", tostring(err))
+    end
+end
+
+local function TryServerHop()
+    Notify("Server Hop", "Searching for available servers...")
+    task.spawn(function()
+        local placeId = game.PlaceId
+        local currentJobId = game.JobId
+        local candidates = {}
+        local cursor = nil
+
+        for _ = 1, 8 do
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100%s",
+                placeId,
+                cursor and ("&cursor=" .. cursor) or ""
+            )
+
+            local fetchOk, body = pcall(function()
+                return game:HttpGet(url)
+            end)
+            if not fetchOk then
+                break
+            end
+
+            local parseOk, payload = pcall(function()
+                return HttpService:JSONDecode(body)
+            end)
+            if not parseOk or typeof(payload) ~= "table" then
+                break
+            end
+
+            local list = payload.data
+            if typeof(list) == "table" then
+                for _, server in ipairs(list) do
+                    local id = server.id
+                    local playing = tonumber(server.playing or server.playerCount) or 0
+                    local maxPlayers = tonumber(server.maxPlayers) or 0
+                    if id and id ~= currentJobId and maxPlayers > 0 and playing < maxPlayers then
+                        table.insert(candidates, id)
+                    end
+                end
+            end
+
+            cursor = payload.nextPageCursor
+            if not cursor then
+                break
+            end
+            task.wait(0.05)
+        end
+
+        if #candidates == 0 then
+            Notify("Server Hop", "No open server found right now")
+            return
+        end
+
+        local targetServerId = candidates[math.random(1, #candidates)]
+        Notify("Server Hop", "Teleporting...")
+        local tpOk, tpErr = pcall(function()
+            TeleportService:TeleportToPlaceInstance(placeId, targetServerId, LocalPlayer)
+        end)
+        if not tpOk then
+            Notify("Server Hop Failed", tostring(tpErr))
+        end
+    end)
+end
+
+local function HasAirdropInCurrentServer()
+    local eventDebris = Workspace:FindFirstChild("EventDebris")
+    return eventDebris and eventDebris:FindFirstChild("Airdrop") ~= nil
+end
+
+local function IsLocalPlayerReadyForAirdropHop()
+    if not game:IsLoaded() then
+        return false
+    end
+
+    local hum, root = GetHumanoidAndRoot(GetCharacter())
+    return hum ~= nil and hum.Health > 0 and root ~= nil
+end
+
+local function WaitForLocalPlayerReadyForAirdropHop(timeout)
+    local deadline = tick() + (timeout or 30)
+    while tick() < deadline do
+        if IsLocalPlayerReadyForAirdropHop() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return IsLocalPlayerReadyForAirdropHop()
+end
+
+local function WaitForAirdropSyncInCurrentServer(timeout)
+    local deadline = tick() + (timeout or 5)
+    while tick() < deadline do
+        if HasAirdropInCurrentServer() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return HasAirdropInCurrentServer()
+end
+
+local function GetQueueOnTeleportFunction()
+    if typeof(queue_on_teleport) == "function" then
+        return queue_on_teleport
+    end
+
+    local okSyn, synObj = pcall(function()
+        return syn
+    end)
+    if okSyn and type(synObj) == "table" and typeof(synObj.queue_on_teleport) == "function" then
+        return synObj.queue_on_teleport
+    end
+
+    local okFlux, fluxObj = pcall(function()
+        return fluxus
+    end)
+    if okFlux and type(fluxObj) == "table" and typeof(fluxObj.queue_on_teleport) == "function" then
+        return fluxObj.queue_on_teleport
+    end
+
+    return nil
+end
+
+local function BuildAirdropServerHopQueueScript()
+    local template = [====[
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+local SOURCE = %q
+local SEEN_JSON = %q
+
+local function hasAirdrop()
+    local eventDebris = Workspace:FindFirstChild("EventDebris")
+    return eventDebris and eventDebris:FindFirstChild("Airdrop") ~= nil
+end
+
+local function isLocalPlayerReady()
+    if not game:IsLoaded() or not LocalPlayer then
+        return false
+    end
+
+    local character = LocalPlayer.Character
+    if not character then
+        return false
+    end
+
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    return hum ~= nil and hum.Health > 0 and root ~= nil
+end
+
+local function waitForFullLoad(timeout)
+    local deadline = tick() + (timeout or 30)
+    while tick() < deadline do
+        if isLocalPlayerReady() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return isLocalPlayerReady()
+end
+
+local function waitForAirdropSync(timeout)
+    local deadline = tick() + (timeout or 5)
+    while tick() < deadline do
+        if hasAirdrop() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return hasAirdrop()
+end
+
+waitForFullLoad(30)
+
+if waitForAirdropSync(5) then
+    print("[Focus] Airdrop found. Stopping airdrop hop.")
+    return
+end
+
+local function getQueueOnTeleport()
+    if typeof(queue_on_teleport) == "function" then
+        return queue_on_teleport
+    end
+
+    local okSyn, synObj = pcall(function()
+        return syn
+    end)
+    if okSyn and type(synObj) == "table" and typeof(synObj.queue_on_teleport) == "function" then
+        return synObj.queue_on_teleport
+    end
+
+    local okFlux, fluxObj = pcall(function()
+        return fluxus
+    end)
+    if okFlux and type(fluxObj) == "table" and typeof(fluxObj.queue_on_teleport) == "function" then
+        return fluxObj.queue_on_teleport
+    end
+
+    return nil
+end
+
+local function decodeSeen(json)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(json or "{}")
+    end)
+    if ok and typeof(data) == "table" then
+        return data
+    end
+    return {}
+end
+
+local function encodeSeen(seen)
+    local ok, data = pcall(function()
+        return HttpService:JSONEncode(seen)
+    end)
+    if ok and type(data) == "string" then
+        return data
+    end
+    return "{}"
+end
+
+local seenServers = decodeSeen(SEEN_JSON)
+seenServers[tostring(game.JobId)] = true
+
+local function queueSelf(seenJson)
+    local queueFn = getQueueOnTeleport()
+    if not queueFn then
+        return
+    end
+
+    pcall(function()
+        queueFn(string.format(SOURCE, SOURCE, seenJson or "{}"))
+    end)
+end
+
+local function collectCandidateServers()
+    local placeId = game.PlaceId
+    local currentJobId = game.JobId
+    local candidates = {}
+    local cursor = nil
+
+    for _ = 1, 8 do
+        local url = "https://games.roblox.com/v1/games/" .. tostring(placeId) .. "/servers/Public?sortOrder=Asc&limit=100"
+        if cursor then
+            url = url .. "&cursor=" .. cursor
+        end
+
+        local fetchOk, body = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if not fetchOk then
+            break
+        end
+
+        local parseOk, payload = pcall(function()
+            return HttpService:JSONDecode(body)
+        end)
+        if not parseOk or typeof(payload) ~= "table" then
+            break
+        end
+
+        local list = payload.data
+        if typeof(list) == "table" then
+            for _, server in ipairs(list) do
+                local id = server.id
+                local idStr = id and tostring(id) or nil
+                local playing = tonumber(server.playing or server.playerCount) or 0
+                local maxPlayers = tonumber(server.maxPlayers) or 0
+                if id and id ~= currentJobId and not seenServers[idStr] and maxPlayers > 0 and playing < maxPlayers then
+                    table.insert(candidates, id)
+                end
+            end
+        end
+
+        cursor = payload.nextPageCursor
+        if not cursor then
+            break
+        end
+        task.wait(0.05)
+    end
+
+    return candidates
+end
+
+local options = collectCandidateServers()
+if #options == 0 then
+    seenServers = {[tostring(game.JobId)] = true}
+    options = collectCandidateServers()
+end
+
+if #options == 0 then
+    queueSelf(encodeSeen(seenServers))
+    pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+else
+    local serverId = options[math.random(1, #options)]
+    seenServers[tostring(serverId)] = true
+    queueSelf(encodeSeen(seenServers))
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+    end)
+end
+]====]
+    local initialSeen = "{}"
+    local seenOk, seenValue = pcall(function()
+        return HttpService:JSONEncode({[tostring(game.JobId)] = true})
+    end)
+    if seenOk and type(seenValue) == "string" then
+        initialSeen = seenValue
+    end
+    return string.format(template, template, initialSeen)
+end
+
+local function TryAirdropServerHop()
+    WaitForLocalPlayerReadyForAirdropHop(30)
+
+    if WaitForAirdropSyncInCurrentServer(5) then
+        Notify("Airdrop Hop", "Airdrop already exists in this server")
+        return
+    end
+
+    local queueFn = GetQueueOnTeleportFunction()
+    if queueFn then
+        local queueScript = BuildAirdropServerHopQueueScript()
+        local queuedOk = pcall(function()
+            queueFn(queueScript)
+        end)
+        if queuedOk then
+            Notify("Airdrop Hop", "Queue armed. Hopping until airdrop is found")
+        else
+            Notify("Airdrop Hop", "Queue failed. Doing single hop only")
+        end
+    else
+        Notify("Airdrop Hop", "No queue support. Doing single hop only")
+    end
+
+    TryServerHop()
+end
+
+local function SetAirdropServerHopEnabled(state)
+    Config.Autofarm.AirdropServerHopEnabled = state
+    if not state then
+        AirdropServerHopTicket += 1
+        AirdropServerHopBusy = false
+        return
+    end
+
+    if HasAirdropInCurrentServer() then
+        Notify("Airdrop Hop", "Airdrop already exists in this server")
+        Config.Autofarm.AirdropServerHopEnabled = false
+        ApplyConfigToControls()
+        return
+    end
+
+    AirdropServerHopTicket += 1
+    local ticket = AirdropServerHopTicket
+    task.spawn(function()
+        while Config.Autofarm.AirdropServerHopEnabled and AirdropServerHopTicket == ticket do
+            if HasAirdropInCurrentServer() then
+                Notify("Airdrop Hop", "Airdrop found. Hop stopped")
+                Config.Autofarm.AirdropServerHopEnabled = false
+                ApplyConfigToControls()
+                break
+            end
+
+            if not AirdropServerHopBusy then
+                AirdropServerHopBusy = true
+                local ok, err = pcall(TryAirdropServerHop)
+                if not ok then
+                    Notify("Airdrop Hop Failed", tostring(err))
+                end
+                task.wait(1)
+                AirdropServerHopBusy = false
+            end
+
+            task.wait(8)
+        end
+    end)
+end
+
+local function IsVehicleDriverSeat(seat)
+    if not seat or not seat:IsA("BasePart") then
+        return false
+    end
+    return seat.Name == "DriveSeat" or seat.Name == "BikeDriveSeat" or seat.Name == "ScooterSeat"
+end
+
+local function GetVehicleModelFromSeat(seat)
+    if not seat then
+        return nil
+    end
+
+    local node = seat
+    while node and node ~= Workspace do
+        if node:IsA("Model") and (node:FindFirstChild("DriveSeat", true) or node:FindFirstChild("BikeDriveSeat", true) or node:FindFirstChild("Wheels", true) or node:FindFirstChild("CarType", true)) then
+            return node
+        end
+        node = node.Parent
+    end
+
+    return seat.Parent and seat.Parent:IsA("Model") and seat.Parent or nil
+end
+
+local function GetVehicleMotionRootPart(seat, vehicleModel)
+    local rootPart = seat
+    local body = vehicleModel and vehicleModel:FindFirstChild("Body")
+    local collisionPart = body and body:FindFirstChild("CollisionPart")
+    if collisionPart and collisionPart:IsA("BasePart") then
+        rootPart = collisionPart
+    end
+
+    if rootPart and rootPart:IsA("BasePart") then
+        return rootPart
+    end
+
+    return nil
+end
+
+local function ResetVehicleCrashState()
+    if VehicleCrashConnection then
+        VehicleCrashConnection:Disconnect()
+        VehicleCrashConnection = nil
+    end
+    if VehicleCrashDeathConnection then
+        VehicleCrashDeathConnection:Disconnect()
+        VehicleCrashDeathConnection = nil
+    end
+    if VehicleCrashState.Humanoid and VehicleCrashState.OriginalBreakJointsOnDeath ~= nil then
+        pcall(function()
+            VehicleCrashState.Humanoid.BreakJointsOnDeath = VehicleCrashState.OriginalBreakJointsOnDeath
+        end)
+    end
+    VehicleCrashState.Seat = nil
+    VehicleCrashState.Humanoid = nil
+    VehicleCrashState.OriginalBreakJointsOnDeath = nil
+    VehicleCrashState.LastTick = 0
+    VehicleCrashState.LastSpeed = 0
+    VehicleCrashState.LastHealth = 0
+end
+
+local function GetVehicleMultiplierFromName(name)
+    local key = string.lower(tostring(name or ""))
+    if key == "" then
+        return nil
+    end
+
+    if string.find(key, "steer", 1, true) or string.find(key, "turn", 1, true) or string.find(key, "yaw", 1, true) then
+        return Config.Vehicle.SteerMult
+    end
+    if string.find(key, "brake", 1, true) then
+        return Config.Vehicle.BrakeMult
+    end
+    if string.find(key, "torque", 1, true) or string.find(key, "horse", 1, true) or string.find(key, "accel", 1, true) or string.find(key, "engine", 1, true) or string.find(key, "power", 1, true) or string.find(key, "boost", 1, true) then
+        return Config.Vehicle.AccelMult
+    end
+    if string.find(key, "speed", 1, true) or string.find(key, "topspeed", 1, true) or string.find(key, "maxvel", 1, true) or string.find(key, "velocity", 1, true) then
+        return Config.Vehicle.SpeedMult
+    end
+
+    return nil
+end
+
+local function RestoreVehicleModdedState()
+    for inst, original in pairs(VehicleOriginalValueObjects) do
+        if inst and inst.Parent then
+            pcall(function()
+                inst.Value = original
+            end)
+        end
+    end
+    VehicleOriginalValueObjects = {}
+
+    for obj, attrs in pairs(VehicleOriginalAttributes) do
+        if obj and obj.Parent then
+            for attrName, original in pairs(attrs) do
+                pcall(function()
+                    obj:SetAttribute(attrName, original)
+                end)
+            end
+        end
+    end
+    VehicleOriginalAttributes = {}
+
+    for seat, props in pairs(VehicleOriginalSeatProperties) do
+        if seat and seat.Parent then
+            for propName, original in pairs(props) do
+                pcall(function()
+                    seat[propName] = original
+                end)
+            end
+        end
+    end
+    VehicleOriginalSeatProperties = {}
+end
+
+local function ApplyVehicleModsForSeat(seat, vehicleModel)
+    if not seat or not vehicleModel then
+        return
+    end
+
+    local descendants = vehicleModel:GetDescendants()
+    for _, inst in ipairs(descendants) do
+        if (inst:IsA("NumberValue") or inst:IsA("IntValue")) and not inst:FindFirstAncestorWhichIsA("Sound") then
+            local mult = GetVehicleMultiplierFromName(inst.Name)
+            if mult then
+                local current = tonumber(inst.Value)
+                if current ~= nil then
+                    if VehicleOriginalValueObjects[inst] == nil then
+                        VehicleOriginalValueObjects[inst] = current
+                    end
+                    local target = VehicleOriginalValueObjects[inst] * mult
+                    if inst:IsA("IntValue") then
+                        target = math.floor(target + 0.5)
+                    end
+                    pcall(function()
+                        inst.Value = target
+                    end)
+                end
+            end
+        end
+
+        local attrs = inst:GetAttributes()
+        for attrName, attrValue in pairs(attrs) do
+            if typeof(attrValue) == "number" then
+                local mult = GetVehicleMultiplierFromName(attrName)
+                if mult then
+                    local store = VehicleOriginalAttributes[inst]
+                    if not store then
+                        store = {}
+                        VehicleOriginalAttributes[inst] = store
+                    end
+                    if store[attrName] == nil then
+                        store[attrName] = attrValue
+                    end
+                    pcall(function()
+                        inst:SetAttribute(attrName, store[attrName] * mult)
+                    end)
+                end
+            end
+        end
+    end
+
+    if seat:IsA("VehicleSeat") then
+        local seatProps = VehicleOriginalSeatProperties[seat]
+        if not seatProps then
+            seatProps = {}
+            VehicleOriginalSeatProperties[seat] = seatProps
+        end
+
+        local seatMultipliers = {
+            MaxSpeed = Config.Vehicle.SpeedMult,
+            Torque = Config.Vehicle.AccelMult,
+            TurnSpeed = Config.Vehicle.SteerMult
+        }
+
+        for propName, mult in pairs(seatMultipliers) do
+            local ok, current = pcall(function()
+                return seat[propName]
+            end)
+            if ok and typeof(current) == "number" then
+                if seatProps[propName] == nil then
+                    seatProps[propName] = current
+                end
+                pcall(function()
+                    seat[propName] = seatProps[propName] * mult
+                end)
+            end
+        end
+    end
+end
+
+local function ApplyVehicleForwardBoost(seat, vehicleModel)
+    if Config.Vehicle.SpeedMult <= 1 or not seat then
+        return
+    end
+
+    local rootPart = GetVehicleMotionRootPart(seat, vehicleModel)
+    if not rootPart then
+        return
+    end
+
+    local boost = (Config.Vehicle.SpeedMult - 1) * 6
+    local baseVelocity = rootPart.AssemblyLinearVelocity
+    local velocity = baseVelocity
+    local look = seat.CFrame.LookVector
+
+    if MoveKeys[Enum.KeyCode.W] then
+        velocity = velocity + look * boost
+    end
+    if MoveKeys[Enum.KeyCode.S] then
+        local reverseScale = Config.Vehicle.NoCrashDamage and 0.25 or 0.75
+        velocity = velocity - look * (boost * reverseScale)
+    end
+    if Config.Vehicle.BrakeMult > 1 and not MoveKeys[Enum.KeyCode.W] and not MoveKeys[Enum.KeyCode.S] then
+        local brakeFactor
+        if Config.Vehicle.NoCrashDamage then
+            brakeFactor = math.max(0.96, 1 - ((Config.Vehicle.BrakeMult - 1) * 0.012))
+        else
+            brakeFactor = math.max(0.85, 1 - ((Config.Vehicle.BrakeMult - 1) * 0.04))
+        end
+        velocity = velocity * brakeFactor
+    end
+
+    local delta = velocity - baseVelocity
+    local maxDelta
+    if Config.Vehicle.NoCrashDamage then
+        maxDelta = 4 + (Config.Vehicle.AccelMult * 1.5)
+    else
+        maxDelta = 9 + (Config.Vehicle.AccelMult * 2.5)
+    end
+    if delta.Magnitude > maxDelta then
+        delta = delta.Unit * maxDelta
+    end
+
+    rootPart.AssemblyLinearVelocity = baseVelocity + delta
+end
+
+local function HandleVehicleCrashProtection(now, hum, seat, vehicleModel)
+    if not Config.Vehicle.NoCrashDamage or not hum or hum.Health <= 0 then
+        ResetVehicleCrashState()
+        return
+    end
+
+    local rootPart = GetVehicleMotionRootPart(seat, vehicleModel)
+    if not rootPart then
+        return
+    end
+
+    local speed = rootPart.AssemblyLinearVelocity.Magnitude
+    local health = hum.Health
+
+    if VehicleCrashState.Seat ~= seat or VehicleCrashState.Humanoid ~= hum then
+        VehicleCrashState.Seat = seat
+        VehicleCrashState.Humanoid = hum
+        VehicleCrashState.LastTick = now
+        VehicleCrashState.LastSpeed = speed
+        VehicleCrashState.LastHealth = health
+        local okBreakJoints, breakJointsOnDeath = pcall(function()
+            return hum.BreakJointsOnDeath
+        end)
+        if okBreakJoints then
+            VehicleCrashState.OriginalBreakJointsOnDeath = breakJointsOnDeath
+            pcall(function()
+                hum.BreakJointsOnDeath = false
+            end)
+        end
+        if VehicleCrashConnection then
+            VehicleCrashConnection:Disconnect()
+        end
+        if VehicleCrashDeathConnection then
+            VehicleCrashDeathConnection:Disconnect()
+        end
+        VehicleCrashConnection = hum.HealthChanged:Connect(function(newHealth)
+            if not Config.Vehicle.NoCrashDamage then
+                return
+            end
+
+            local activeSeat = hum.SeatPart
+            if not IsVehicleDriverSeat(activeSeat) then
+                return
+            end
+
+            local floorHealth = math.max(VehicleCrashState.LastHealth, math.min(hum.MaxHealth, 25))
+            if newHealth < floorHealth then
+                pcall(function()
+                    hum.Health = floorHealth
+                    if newHealth <= 0 then
+                        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                    end
+                end)
+            else
+                VehicleCrashState.LastHealth = newHealth
+            end
+        end)
+        VehicleCrashDeathConnection = hum.StateChanged:Connect(function(_, newState)
+            if not Config.Vehicle.NoCrashDamage then
+                return
+            end
+            if newState ~= Enum.HumanoidStateType.Dead then
+                return
+            end
+            if not IsVehicleDriverSeat(hum.SeatPart) then
+                return
+            end
+
+            local recoverHealth = math.max(VehicleCrashState.LastHealth, math.min(hum.MaxHealth, 25))
+            pcall(function()
+                hum.Health = recoverHealth
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end)
+        end)
+        return
+    end
+
+    local floorHealth = math.max(VehicleCrashState.LastHealth, math.min(hum.MaxHealth, 25))
+    if health < floorHealth then
+        local restoredHealth = math.min(hum.MaxHealth, floorHealth)
+        pcall(function()
+            hum.Health = restoredHealth
+        end)
+        health = hum.Health
+    end
+
+    VehicleCrashState.LastTick = now
+    VehicleCrashState.LastSpeed = speed
+    VehicleCrashState.LastHealth = health
+end
+
+local function HandleVehicleMods(now)
+    local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if not IsVehicleDriverSeat(seat) then
+        if VehicleModsActive then
+            RestoreVehicleModdedState()
+            VehicleModsActive = false
+        end
+        ResetVehicleCrashState()
+        return
+    end
+
+    local vehicleModel = GetVehicleModelFromSeat(seat)
+    if Config.Vehicle.Enabled then
+        if vehicleModel and now - FeatureCooldowns.Vehicle >= 0.2 then
+            FeatureCooldowns.Vehicle = now
+            ApplyVehicleModsForSeat(seat, vehicleModel)
+            VehicleModsActive = true
+        elseif not vehicleModel and VehicleModsActive then
+            RestoreVehicleModdedState()
+            VehicleModsActive = false
+        end
+
+        ApplyVehicleForwardBoost(seat, vehicleModel)
+    elseif VehicleModsActive then
+        RestoreVehicleModdedState()
+        VehicleModsActive = false
+    end
+
+    HandleVehicleCrashProtection(now, hum, seat, vehicleModel)
+end
+
+local function SetVehicleModsEnabled(state)
+    Config.Vehicle.Enabled = state
+    if not state then
+        RestoreVehicleModdedState()
+        VehicleModsActive = false
+        ResetVehicleCrashState()
+    end
 end
 
 local function SetToggleState(toggle, state)
@@ -720,6 +1967,7 @@ Controls.ESPBoxes = sectESP:addToggle({ text = 'Boxes', state = false }, functio
 Controls.ESPNames = sectESP:addToggle({ text = 'Names', state = false }, function(v) Config.Visuals.Name = v end)
 Controls.ESPHealth = sectESP:addToggle({ text = 'Health Bar', state = false }, function(v) Config.Visuals.Health = v end)
 Controls.ESPTool = sectESP:addToggle({ text = 'Held Weapon', state = false }, function(v) Config.Visuals.Tool = v end)
+Controls.ESPTracers = sectESP:addToggle({ text = 'Tracers', state = false }, function(v) Config.Visuals.Tracer = v end)
 Controls.ESPDistance = sectESP:addSlider({ text = 'Render Distance', min = 100, max = 5000, value = 2500 }, function(v) Config.Visuals.MaxDist = v end)
 
 -- > TAB 4: MOVEMENT
@@ -739,11 +1987,16 @@ local menuMisc = window:addMenu({ text = 'Farm & Utils' })
 local sectFarm = menuMisc:addSection({ text = 'Autofarm', side = 'left' })
 Controls.AutofarmSpeed = sectFarm:addSlider({ text = 'Farm Speed', min = 10, max = 30, value = 30 }, function(v) Config.Autofarm.Speed = v end)
 Controls.AutofarmEnabled = sectFarm:addToggle({ text = 'Spill Autofarm', state = false }, function(v) SetAutofarmEnabled(v) end)
+Controls.AutofarmAirdrop = sectFarm:addToggle({ text = 'Airdrop Autofarm', state = false }, function(v) SetAirdropAutofarmEnabled(v) end)
+Controls.AutofarmAirdropRadius = sectFarm:addSlider({ text = 'Airdrop Kill Radius', min = 15, max = 250, value = 75 }, function(v) Config.Autofarm.AirdropKillRadius = v end)
+Controls.AutofarmAirdropHop = sectFarm:addToggle({ text = 'ServerHop Airdrop', state = false }, function(v) SetAirdropServerHopEnabled(v) end)
 sectFarm:addButton({ text = 'Load Bank Farm' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/Auto"))() end)
 
 local sectUtil = menuMisc:addSection({ text = 'Utility', side = 'right' })
 Controls.CashMagnet = sectUtil:addToggle({ text = 'Cash Magnet', state = false }, function(v) Config.Misc.CashPickup = v end)
-Controls.CashRange = sectUtil:addSlider({ text = 'Cash Range', min = 1, max = 250, value = 25 }, function(v) Config.Misc.PickupRange = v end)
+Controls.CashRange = sectUtil:addSlider({ text = 'Cash Range', min = 1, max = 50, value = 25 }, function(v) Config.Misc.PickupRange = v end)
+Controls.LootMagnet = sectUtil:addToggle({ text = 'Loot Magnet', state = false }, function(v) Config.Misc.LootMagnet = v end)
+Controls.LootRange = sectUtil:addSlider({ text = 'Loot Range', min = 5, max = 50, value = 30 }, function(v) Config.Misc.LootRange = v end)
 sectUtil:addButton({ text = 'Inventory Viewer' }, function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/inventoryviewer"))() end)
 
 -- > TAB 6: TELEPORTS (NEW)
@@ -765,6 +2018,16 @@ sectTp:addButton({ text = 'Bank' }, function() TeleportTo(Vector3.new(-225, 4, 9
 sectTp:addButton({ text = 'Idea' }, function() TeleportTo(Vector3.new(298, 4, -195)) end)
 sectTp:addButton({ text = 'BlackMarket' }, function() TeleportTo(Vector3.new(259, 4, 428)) end)
 
+-- > TAB 7: VEHICLE
+local menuVehicle = window:addMenu({ text = 'Vehicle' })
+local sectVehicle = menuVehicle:addSection({ text = 'Performance', side = 'left' })
+Controls.VehicleEnabled = sectVehicle:addToggle({ text = 'Enable Vehicle Mods', state = false }, function(v) SetVehicleModsEnabled(v) end)
+Controls.VehicleSpeedMult = sectVehicle:addSlider({ text = 'Speed Mult', min = 1, max = 10, value = 1 }, function(v) Config.Vehicle.SpeedMult = v end)
+Controls.VehicleAccelMult = sectVehicle:addSlider({ text = 'Accel Mult', min = 1, max = 5, value = 1 }, function(v) Config.Vehicle.AccelMult = v end)
+Controls.VehicleBrakeMult = sectVehicle:addSlider({ text = 'Brake Mult', min = 1, max = 5, value = 1 }, function(v) Config.Vehicle.BrakeMult = v end)
+Controls.VehicleSteerMult = sectVehicle:addSlider({ text = 'Steer Mult', min = 1, max = 5, value = 1 }, function(v) Config.Vehicle.SteerMult = v end)
+Controls.VehicleNoCrashDamage = sectVehicle:addToggle({ text = 'No Crash Damage', state = true }, function(v) Config.Vehicle.NoCrashDamage = v end)
+
 ApplyConfigToControls = function()
     Config = ClampConfigValues(MergeWithDefaults(DefaultConfig, Config))
 
@@ -784,6 +2047,7 @@ ApplyConfigToControls = function()
     SetToggleState(Controls.ESPNames, Config.Visuals.Name)
     SetToggleState(Controls.ESPHealth, Config.Visuals.Health)
     SetToggleState(Controls.ESPTool, Config.Visuals.Tool)
+    SetToggleState(Controls.ESPTracers, Config.Visuals.Tracer)
     SetSliderValue(Controls.ESPDistance, Config.Visuals.MaxDist)
 
     SetToggleState(Controls.MovementSlide, Config.Movement.SlideEnabled)
@@ -795,8 +2059,19 @@ ApplyConfigToControls = function()
 
     SetSliderValue(Controls.AutofarmSpeed, Config.Autofarm.Speed)
     SetToggleState(Controls.AutofarmEnabled, Config.Autofarm.Enabled)
+    SetToggleState(Controls.AutofarmAirdrop, Config.Autofarm.AirdropEnabled)
+    SetSliderValue(Controls.AutofarmAirdropRadius, Config.Autofarm.AirdropKillRadius)
+    SetToggleState(Controls.AutofarmAirdropHop, Config.Autofarm.AirdropServerHopEnabled)
+    SetToggleState(Controls.VehicleEnabled, Config.Vehicle.Enabled)
+    SetSliderValue(Controls.VehicleSpeedMult, Config.Vehicle.SpeedMult)
+    SetSliderValue(Controls.VehicleAccelMult, Config.Vehicle.AccelMult)
+    SetSliderValue(Controls.VehicleBrakeMult, Config.Vehicle.BrakeMult)
+    SetSliderValue(Controls.VehicleSteerMult, Config.Vehicle.SteerMult)
+    SetToggleState(Controls.VehicleNoCrashDamage, Config.Vehicle.NoCrashDamage)
     SetToggleState(Controls.CashMagnet, Config.Misc.CashPickup)
     SetSliderValue(Controls.CashRange, Config.Misc.PickupRange)
+    SetToggleState(Controls.LootMagnet, Config.Misc.LootMagnet)
+    SetSliderValue(Controls.LootRange, Config.Misc.LootRange)
 
     FOVCircle.Radius = Config.SilentAim.FOV
     FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
@@ -805,7 +2080,7 @@ ApplyConfigToControls = function()
     end
 end
 
--- > TAB 7: SETTINGS
+-- > TAB 8: SETTINGS
 local menuSettings = window:addMenu({ text = 'Settings' })
 local sectSettings = menuSettings:addSection({ text = 'Config System', side = 'left' })
 local sectSettingsTools = menuSettings:addSection({ text = 'Tools', side = 'right' })
@@ -869,6 +2144,14 @@ sectSettingsTools:addButton({ text = 'Reset Defaults' }, function()
     Notify("Config Reset", "Defaults restored")
 end)
 
+sectSettingsTools:addButton({ text = 'Server Hop' }, function()
+    TryServerHop()
+end)
+
+sectSettingsTools:addButton({ text = 'Rejoin' }, function()
+    TryRejoin()
+end)
+
 local loadedLast, loadedName = LoadLastConfig()
 if loadedLast then
     Notify("Config", "Auto-loaded " .. loadedName .. ".json", 2)
@@ -926,6 +2209,8 @@ RunService.RenderStepped:Connect(function()
         else Movers.SlideBV.Velocity = Vector3.zero end
     end
 
+    HandleVehicleMods(tick())
+
     -- Gun Mods
     local char = GetCharacter()
     local tool = char and char:FindFirstChildWhichIsA("Tool")
@@ -956,6 +2241,8 @@ RunService.RenderStepped:Connect(function()
 end)
 
 RunService.Heartbeat:Connect(function()
+    local now = tick()
+
     if Config.Misc.CashPickup then
         local _, root = GetHumanoidAndRoot(GetCharacter())
         local folder = Workspace:FindFirstChild("OBJECTS")
@@ -967,6 +2254,11 @@ RunService.Heartbeat:Connect(function()
                 end
             end
         end
+    end
+
+    if Config.Misc.LootMagnet and now - FeatureCooldowns.Loot >= 0.15 then
+        FeatureCooldowns.Loot = now
+        HandleLootMagnet()
     end
 end)
 
