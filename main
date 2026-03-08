@@ -37,6 +37,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
+local VirtualUser = nil
+local VirtualInputManager = nil
+pcall(function()
+    VirtualUser = game:GetService("VirtualUser")
+end)
+pcall(function()
+    VirtualInputManager = game:GetService("VirtualInputManager")
+end)
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
@@ -84,7 +92,8 @@ local DefaultConfig = {
         PickupRange = 25,
         LootMagnet = false,
         LootRange = 30,
-        ModDetection = false
+        ModDetection = false,
+        AntiAFK = false
     }
 }
 
@@ -192,6 +201,7 @@ local function ClampConfigValues(cfg)
     cfg.Misc.PickupRange = math.clamp(cfg.Misc.PickupRange, 1, 50)
     cfg.Misc.LootRange = math.clamp(cfg.Misc.LootRange, 5, 50)
     cfg.Misc.ModDetection = cfg.Misc.ModDetection == true
+    cfg.Misc.AntiAFK = cfg.Misc.AntiAFK == true
     return cfg
 end
 
@@ -1248,6 +1258,70 @@ local window = ui.newWindow({ text = ' Focus ', resize = true, size = Vector2.ne
 local function Notify(title, message, duration)
     ui.notify({ title = title, message = message, duration = duration or 3 })
     print(string.format("[Focus] %s: %s", tostring(title), tostring(message)))
+end
+
+local AntiAfkEnvironment = {
+    IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
+    HasVirtualUser = false,
+    HasVIM = VirtualInputManager ~= nil
+}
+local LastAntiAfkNudge = tick()
+
+if VirtualUser then
+    pcall(function()
+        VirtualUser:CaptureController()
+        AntiAfkEnvironment.HasVirtualUser = true
+    end)
+end
+
+local function MobileCameraNudge()
+    local cam = GetCamera()
+    if not cam then
+        return
+    end
+
+    local originalCFrame = cam.CFrame
+    local targetCFrame = originalCFrame * CFrame.Angles(0, math.rad(math.random(-2, 2)), 0)
+
+    local tweenIn = TweenService:Create(cam, TweenInfo.new(0.35, Enum.EasingStyle.Sine), { CFrame = targetCFrame })
+    local tweenOut = TweenService:Create(cam, TweenInfo.new(0.35, Enum.EasingStyle.Sine), { CFrame = originalCFrame })
+    tweenIn:Play()
+    tweenIn.Completed:Wait()
+    task.wait(0.05)
+    tweenOut:Play()
+end
+
+local function TriggerAntiAfkInput()
+    local cam = GetCamera()
+    if AntiAfkEnvironment.HasVirtualUser and cam then
+        pcall(function()
+            VirtualUser:CaptureController()
+            local viewport = cam.ViewportSize
+            VirtualUser:ClickButton2(Vector2.new(viewport.X * 0.5, viewport.Y * 0.5), cam.CFrame)
+        end)
+    elseif AntiAfkEnvironment.HasVIM then
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
+        end)
+    end
+
+    if AntiAfkEnvironment.IsMobile then
+        task.spawn(MobileCameraNudge)
+    end
+
+    local humanoid = GetHumanoidAndRoot(GetCharacter())
+    if humanoid and humanoid:GetState() ~= Enum.HumanoidStateType.Dead and math.random(1, 3) == 1 then
+        humanoid.Jump = true
+    end
+end
+
+local function SetAntiAfkEnabled(state)
+    Config.Misc.AntiAFK = state == true
+    if Config.Misc.AntiAFK then
+        LastAntiAfkNudge = tick()
+    end
 end
 
 local function TryRejoin()
@@ -2527,7 +2601,11 @@ ApplyConfigToControls = function()
     SetSliderValue(Controls.CashRange, Config.Misc.PickupRange)
     SetToggleState(Controls.LootMagnet, Config.Misc.LootMagnet)
     SetSliderValue(Controls.LootRange, Config.Misc.LootRange)
+    SetToggleState(Controls.SettingsAntiAFK, Config.Misc.AntiAFK)
     SetToggleState(Controls.SettingsModDetection, Config.Misc.ModDetection)
+    if Config.Misc.AntiAFK then
+        LastAntiAfkNudge = tick()
+    end
 
     FOVCircle.Radius = Config.SilentAim.FOV
     FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
@@ -2608,6 +2686,10 @@ sectSettingsTools:addButton({ text = 'Rejoin' }, function()
     TryRejoin()
 end)
 
+Controls.SettingsAntiAFK = sectSettingsTools:addToggle({ text = 'Anti AFK', state = false }, function(v)
+    SetAntiAfkEnabled(v)
+end)
+
 Controls.SettingsModDetection = sectSettingsTools:addToggle({ text = 'Mod Detection', state = false }, function(v)
     SetModDetectionEnabled(v)
 end)
@@ -2618,6 +2700,13 @@ if loadedLast then
 else
     ApplyConfigToControls()
 end
+
+LocalPlayer.Idled:Connect(function()
+    if not Config.Misc.AntiAFK then
+        return
+    end
+    TriggerAntiAfkInput()
+end)
 
 -- [[ 7. MAIN LOOPS ]] --
 RunService.RenderStepped:Connect(function()
@@ -2716,6 +2805,11 @@ RunService.Heartbeat:Connect(function()
                 end
             end
         end
+    end
+
+    if Config.Misc.AntiAFK and now - LastAntiAfkNudge >= 180 then
+        LastAntiAfkNudge = now
+        task.spawn(MobileCameraNudge)
     end
 
     if Config.Misc.LootMagnet and now - FeatureCooldowns.Loot >= 0.15 then
