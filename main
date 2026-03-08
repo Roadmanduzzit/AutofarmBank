@@ -2466,11 +2466,18 @@ Controls.VehicleSteerMult = sectVehicle:addSlider({ text = 'Steer Mult', min = 1
 Controls.VehicleNoCrashDamage = sectVehicle:addToggle({ text = 'No Crash Damage', state = true }, function(v) Config.Vehicle.NoCrashDamage = v end)
 
 -- > TAB 8: KEYBINDS
-local menuKeybinds = window:addMenu({ text = 'KeyBinds' })
-local sectKeybindsMove = menuKeybinds:addSection({ text = 'Movement Toggles', side = 'left' })
-Controls.MovementSlideKeybind = sectKeybindsMove:addTextbox({ text = 'Speed / Slide Toggle Key' }, function(v) SetMovementKeybind("SlideKeybind", v, "Speed / Slide") end)
-Controls.MovementFlyKeybind = sectKeybindsMove:addTextbox({ text = 'Fly Toggle Key' }, function(v) SetMovementKeybind("FlyKeybind", v, "Fly") end)
-Controls.MovementNoclipKeybind = sectKeybindsMove:addTextbox({ text = 'Noclip Toggle Key' }, function(v) SetMovementKeybind("NoclipKeybind", v, "Noclip") end)
+local menuKeybinds = window:addMenu({ text = 'Keybinds' })
+local sectKeybindLabels = menuKeybinds:addSection({ text = 'Feature', side = 'left' })
+local sectKeybindInputs = menuKeybinds:addSection({ text = 'Keybind', side = 'right' })
+
+sectKeybindLabels:addLabel({ text = 'Slide Speed Toggle' })
+Controls.MovementSlideKeybind = sectKeybindInputs:addTextbox({ text = 'X' }, function(v) SetMovementKeybind("SlideKeybind", v, "Slide Speed") end)
+
+sectKeybindLabels:addLabel({ text = 'Fly Mode Toggle' })
+Controls.MovementFlyKeybind = sectKeybindInputs:addTextbox({ text = 'F' }, function(v) SetMovementKeybind("FlyKeybind", v, "Fly Mode") end)
+
+sectKeybindLabels:addLabel({ text = 'Noclip Toggle' })
+Controls.MovementNoclipKeybind = sectKeybindInputs:addTextbox({ text = 'N' }, function(v) SetMovementKeybind("NoclipKeybind", v, "Noclip") end)
 
 ApplyConfigToControls = function()
     Config = ClampConfigValues(MergeWithDefaults(DefaultConfig, Config))
