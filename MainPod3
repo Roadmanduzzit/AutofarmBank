@@ -1,0 +1,2156 @@
+-- =============================================================================
+-- Focus Hub - Survival Pack
+-- Added features:
+-- 1) ChopTree Aura
+-- 2) Multi-target Mob Aura
+-- 3) CFrame Fly + CFrame WalkSpeed
+-- 8) Item Bag Aura
+-- 9) Auto Tame
+-- 12) Multi-category ESP
+-- =============================================================================
+
+-- Services
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local ui = nil
+
+-- Runtime state
+local State = {
+    ChopTreeAura = false,
+    ChopRange = 16,
+    ChopInterval = 0.2,
+    ChopTargets = 3,
+
+    MobAura = false,
+    MobAuraRange = 16,
+    MobAuraInterval = 0.15,
+    MobAuraTargets = 3,
+    MobAuraIgnoreTamed = true,
+    MobAuraIgnoreNotAttackable = true,
+
+    CFrameFly = false,
+    CFrameFlySpeed = 75,
+
+    CFrameWalkSpeedEnabled = false,
+    CFrameWalkSpeed = 28,
+
+    Noclip = false,
+
+    BringLogs = false,
+    BringLogsInterval = 0.25,
+    BringLogsRange = 350,
+    BringLogsPerTick = 20,
+    BringLogsSpread = 8,
+    BringLogsUseDragOwnership = true,
+    BringLogsHoldTime = 1.1,
+
+    ChestTP = false,
+    ChestTPInterval = 1.2,
+
+    InstantPromptReact = false,
+    PromptReactInterval = 0.08,
+
+    ItemBagAura = false,
+    ItemBagRange = 16,
+    ItemBagInterval = 0.3,
+
+    AutoTame = false,
+    AutoTameRange = 20,
+    AutoTameInterval = 1.0,
+    PerfectTame = true,
+
+    ESP = false,
+    ESPDistance = 220,
+    ESPTreesResources = true,
+    ESPFarmPlots = true,
+    ESPTameables = true,
+    ESPCorpses = true,
+    ESPStructures = true,
+    ESPChests = true
+}
+
+local Config = {
+    SpecialResources = {
+        IceBlock = true,
+        MeteorNode = true
+    },
+    ESPColors = {
+        TreeResource = Color3.fromRGB(116, 231, 123),
+        FarmPlot = Color3.fromRGB(86, 181, 255),
+        Tameable = Color3.fromRGB(255, 216, 103),
+        Corpse = Color3.fromRGB(188, 116, 255),
+        Structure = Color3.fromRGB(255, 155, 94),
+        Chest = Color3.fromRGB(255, 238, 120),
+        Background = Color3.fromRGB(18, 18, 18)
+    },
+    ESPLabels = {
+        TreeResource = "Tree/Resource",
+        FarmPlot = "Farm Plot",
+        Tameable = "Tameable",
+        Corpse = "Corpse",
+        Structure = "Structure",
+        Chest = "Chest"
+    }
+}
+
+-- =============================================================================
+-- Client / remote helpers
+-- =============================================================================
+local ClientModule = nil
+local function getClient()
+    if ClientModule then
+        return ClientModule
+    end
+
+    local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+    if not playerScripts then
+        return nil
+    end
+
+    local clientScript = playerScripts:FindFirstChild("Client")
+    if not clientScript then
+        return nil
+    end
+
+    local ok, result = pcall(require, clientScript)
+    if ok then
+        ClientModule = result
+    end
+    return ClientModule
+end
+
+local function getRemote(name)
+    local client = getClient()
+    if client and client.Events and client.Events[name] then
+        return client.Events[name]
+    end
+
+    local remoteFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
+    if remoteFolder then
+        return remoteFolder:FindFirstChild(name)
+    end
+
+    return nil
+end
+
+local function callRemote(name, ...)
+    local remote = getRemote(name)
+    if not remote then
+        return false, nil
+    end
+
+    local ok, result = pcall(function(...)
+        if typeof(remote) == "Instance" then
+            if remote:IsA("RemoteFunction") then
+                return remote:InvokeServer(...)
+            end
+            if remote:IsA("RemoteEvent") then
+                remote:FireServer(...)
+                return true
+            end
+        end
+
+        if type(remote) == "table" then
+            if remote.InvokeServer then
+                return remote:InvokeServer(...)
+            end
+            if remote.FireServer then
+                remote:FireServer(...)
+                return true
+            end
+        end
+
+        if remote.InvokeServer then
+            return remote:InvokeServer(...)
+        end
+        if remote.FireServer then
+            remote:FireServer(...)
+            return true
+        end
+    end, ...)
+
+    return ok, result
+end
+
+-- =============================================================================
+-- Generic helpers
+-- =============================================================================
+local function getRootPart()
+    local character = LocalPlayer.Character
+    if not character then
+        return nil
+    end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getInstancePosition(instance)
+    if not instance then
+        return nil
+    end
+
+    if instance:IsA("BasePart") then
+        return instance.Position
+    end
+
+    if instance:IsA("Model") then
+        local ok, pivot = pcall(function()
+            return instance:GetPivot()
+        end)
+        if ok and pivot then
+            return pivot.Position
+        end
+
+        if instance.PrimaryPart then
+            return instance.PrimaryPart.Position
+        end
+
+        local anyPart = instance:FindFirstChildWhichIsA("BasePart", true)
+        if anyPart then
+            return anyPart.Position
+        end
+    end
+
+    return nil
+end
+
+local function getModelAdornee(instance)
+    if not instance then
+        return nil
+    end
+
+    if instance:IsA("BasePart") then
+        return instance
+    end
+
+    if instance:IsA("Model") then
+        return instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return nil
+end
+
+local function lower(value)
+    return string.lower(tostring(value or ""))
+end
+
+local function getMovablePart(instance)
+    if not instance then
+        return nil
+    end
+    if instance:IsA("BasePart") then
+        return instance
+    end
+    if instance:IsA("Model") then
+        return instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
+local LogDragStates = {}
+
+local function collectLogTargets()
+    local items = Workspace:FindFirstChild("Items")
+    if not items then
+        return {}
+    end
+
+    local targets = {}
+    local seen = {}
+
+    local function addIfLog(inst, forceInclude)
+        if not inst or seen[inst] then
+            return
+        end
+        if not (inst:IsA("Model") or inst:IsA("BasePart")) then
+            return
+        end
+
+        local nameLower = lower(inst.Name)
+        if forceInclude or nameLower == "log" or string.find(nameLower, "log", 1, true) then
+            seen[inst] = true
+            table.insert(targets, inst)
+        end
+    end
+
+    local function addFromContainer(container)
+        if not container then
+            return
+        end
+
+        if container:IsA("Model") or container:IsA("BasePart") then
+            addIfLog(container, true)
+            return
+        end
+
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Folder") then
+                for _, grandChild in ipairs(child:GetChildren()) do
+                    addIfLog(grandChild, true)
+                end
+            else
+                addIfLog(child, true)
+            end
+        end
+    end
+
+    addFromContainer(items:FindFirstChild("Logs"))
+    addFromContainer(items:FindFirstChild("Log"))
+
+    for _, child in ipairs(items:GetChildren()) do
+        addIfLog(child, false)
+    end
+
+    return targets
+end
+
+local function tryRemoteVariants(remoteName, variants)
+    for _, args in ipairs(variants) do
+        local ok, result = callRemote(remoteName, unpack(args))
+        if ok then
+            if type(result) == "table" then
+                if result.Success ~= false then
+                    return true
+                end
+            else
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function requestLogDragStart(logObj)
+    local root = getRootPart()
+    local variants = {
+        { logObj },
+        { logObj, true }
+    }
+    if root then
+        table.insert(variants, { logObj, root.Position })
+        table.insert(variants, { logObj, root.CFrame })
+    end
+    return tryRemoteVariants("RequestStartDraggingItem", variants)
+end
+
+local function requestLogDragStop(logObj)
+    local variants = {
+        { logObj },
+        {}
+    }
+    return tryRemoteVariants("StopDraggingItem", variants)
+end
+
+local function releaseAllLogDrags()
+    for logObj in pairs(LogDragStates) do
+        requestLogDragStop(logObj)
+    end
+    LogDragStates = {}
+end
+
+local function updateLogDragOwnership(logObj, now)
+    local state = LogDragStates[logObj]
+    if not state then
+        requestLogDragStart(logObj)
+        LogDragStates[logObj] = {
+            StartedAt = now,
+            ReadyAt = now + State.BringLogsHoldTime,
+            ExpireAt = now + State.BringLogsHoldTime + 4
+        }
+        return false
+    end
+
+    if state.ReleaseAt then
+        return false
+    end
+
+    if now >= state.ReadyAt then
+        return true
+    end
+
+    if (now - state.StartedAt) > (State.BringLogsHoldTime + 1.5) then
+        requestLogDragStart(logObj)
+        state.StartedAt = now
+        state.ReadyAt = now + State.BringLogsHoldTime
+        state.ExpireAt = now + State.BringLogsHoldTime + 4
+    end
+
+    return false
+end
+
+local function queueLogDragRelease(logObj, now)
+    local state = LogDragStates[logObj]
+    if not state then
+        return
+    end
+    state.ReleaseAt = now + 0.15
+    state.ExpireAt = math.max(state.ExpireAt or 0, now + 2.5)
+end
+
+local function moveLogToTarget(logObj, part, targetPos)
+    local movedByPivot = false
+    pcall(function()
+        if logObj:IsA("Model") then
+            logObj:PivotTo(CFrame.new(targetPos))
+        else
+            logObj.CFrame = CFrame.new(targetPos)
+        end
+        movedByPivot = true
+    end)
+
+    if (not movedByPivot) or (part.Position - targetPos).Magnitude > 6 then
+        pcall(function()
+            part.CFrame = CFrame.new(targetPos)
+        end)
+    end
+
+    local delta = targetPos - part.Position
+    if delta.Magnitude > 0.05 then
+        part.AssemblyLinearVelocity = delta.Unit * math.clamp(delta.Magnitude * 18, 40, 260)
+    else
+        part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    end
+    part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+    return (part.Position - targetPos).Magnitude <= 20
+end
+
+local function cleanupLogDragStates(now)
+    for logObj, state in pairs(LogDragStates) do
+        local releaseNow = state and state.ReleaseAt and now >= state.ReleaseAt
+        local expired = state and state.ExpireAt and now > state.ExpireAt
+        if releaseNow then
+            requestLogDragStop(logObj)
+            LogDragStates[logObj] = nil
+        elseif not logObj or not logObj.Parent or expired then
+            if logObj and logObj.Parent then
+                requestLogDragStop(logObj)
+            end
+            LogDragStates[logObj] = nil
+        end
+    end
+end
+
+local function bringNearbyLogs()
+    local root = getRootPart()
+    if not root then
+        return
+    end
+
+    local logTargets = collectLogTargets()
+    if #logTargets == 0 then
+        return
+    end
+
+    local now = os.clock()
+    cleanupLogDragStates(now)
+    if not State.BringLogsUseDragOwnership and next(LogDragStates) ~= nil then
+        releaseAllLogDrags()
+    end
+
+    local moved = 0
+    local maxCount = math.max(1, math.floor(State.BringLogsPerTick))
+    local spread = math.max(1, State.BringLogsSpread)
+
+    for _, logObj in ipairs(logTargets) do
+        if moved >= maxCount then
+            break
+        end
+
+        if (logObj:IsA("Model") or logObj:IsA("BasePart")) and not logObj:GetAttribute("Destroyed") then
+            local pos = getInstancePosition(logObj)
+            if pos and (pos - root.Position).Magnitude <= State.BringLogsRange then
+                if State.BringLogsUseDragOwnership then
+                    if not updateLogDragOwnership(logObj, now) then
+                        continue
+                    end
+                end
+
+                local offset = Vector3.new(
+                    (math.random() - 0.5) * spread,
+                    1.5,
+                    (math.random() - 0.5) * spread
+                )
+                local targetPos = root.Position + root.CFrame.LookVector * 5 + offset
+
+                local part = getMovablePart(logObj)
+                if part then
+                    local movedToPlayer = moveLogToTarget(logObj, part, targetPos)
+                    if State.BringLogsUseDragOwnership then
+                        if movedToPlayer then
+                            queueLogDragRelease(logObj, now)
+                        else
+                            local state = LogDragStates[logObj]
+                            if state then
+                                state.ExpireAt = now + 2.5
+                            end
+                        end
+                    end
+
+                    if movedToPlayer then
+                        moved = moved + 1
+                    end
+                end
+            end
+        end
+    end
+end
+
+local ActivePrompts = {}
+local PromptReactCooldowns = {}
+
+local function getPromptWorldPosition(prompt)
+    if not prompt or not prompt.Parent then
+        return nil
+    end
+
+    local holder = prompt.Parent
+    if holder:IsA("Attachment") then
+        holder = holder.Parent
+    end
+
+    return getInstancePosition(holder)
+end
+
+local function canReactToPrompt(prompt, now)
+    if not State.InstantPromptReact then
+        return false
+    end
+    if not prompt or not prompt.Parent or not prompt.Enabled then
+        return false
+    end
+
+    local last = PromptReactCooldowns[prompt]
+    if last and (now - last) < math.max(0.02, State.PromptReactInterval * 0.5) then
+        return false
+    end
+
+    local root = getRootPart()
+    if root then
+        local promptPos = getPromptWorldPosition(prompt)
+        if promptPos then
+            local maxDistance = tonumber(prompt.MaxActivationDistance) or 12
+            if (promptPos - root.Position).Magnitude > (maxDistance + 6) then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+local function tryInstantPromptReact(prompt, now)
+    now = now or os.clock()
+    if not canReactToPrompt(prompt, now) then
+        return false
+    end
+
+    local fired = false
+    if typeof(fireproximityprompt) == "function" then
+        local ok = pcall(fireproximityprompt, prompt)
+        if not ok then
+            ok = pcall(fireproximityprompt, prompt, 0)
+        end
+        fired = ok
+    end
+
+    if not fired and prompt.InputHoldBegin and prompt.InputHoldEnd then
+        local oldHold = prompt.HoldDuration
+        local ok = pcall(function()
+            prompt.HoldDuration = 0
+            prompt:InputHoldBegin()
+            prompt:InputHoldEnd()
+        end)
+        pcall(function()
+            prompt.HoldDuration = oldHold
+        end)
+        fired = ok
+    end
+
+    if fired then
+        PromptReactCooldowns[prompt] = now
+    end
+    return fired
+end
+
+local function reactToActivePrompts(now)
+    for prompt in pairs(ActivePrompts) do
+        if not prompt or not prompt.Parent then
+            ActivePrompts[prompt] = nil
+            PromptReactCooldowns[prompt] = nil
+        else
+            tryInstantPromptReact(prompt, now)
+        end
+    end
+end
+
+ProximityPromptService.PromptShown:Connect(function(prompt)
+    ActivePrompts[prompt] = true
+    if State.InstantPromptReact then
+        task.defer(function()
+            tryInstantPromptReact(prompt, os.clock())
+        end)
+    end
+end)
+
+ProximityPromptService.PromptHidden:Connect(function(prompt)
+    ActivePrompts[prompt] = nil
+    PromptReactCooldowns[prompt] = nil
+end)
+
+-- =============================================================================
+-- Input tracking (for CFrame fly)
+-- =============================================================================
+local FlyInput = {
+    W = false,
+    A = false,
+    S = false,
+    D = false,
+    Up = false,
+    Down = false
+}
+
+local function setFlyInputState(keyCode, isDown)
+    if keyCode == Enum.KeyCode.W then
+        FlyInput.W = isDown
+    elseif keyCode == Enum.KeyCode.A then
+        FlyInput.A = isDown
+    elseif keyCode == Enum.KeyCode.S then
+        FlyInput.S = isDown
+    elseif keyCode == Enum.KeyCode.D then
+        FlyInput.D = isDown
+    elseif keyCode == Enum.KeyCode.Space or keyCode == Enum.KeyCode.E then
+        FlyInput.Up = isDown
+    elseif keyCode == Enum.KeyCode.LeftControl
+        or keyCode == Enum.KeyCode.Q
+        or keyCode == Enum.KeyCode.LeftShift
+    then
+        FlyInput.Down = isDown
+    end
+end
+
+local KeybindConfig = {
+    ChopAura = { Label = "Toggle Chop Aura", StateKey = "ChopTreeAura", Default = nil },
+    MobAura = { Label = "Toggle Mob Aura", StateKey = "MobAura", Default = nil },
+    ItemBagAura = { Label = "Toggle Item Bag Aura", StateKey = "ItemBagAura", Default = nil },
+    AutoTame = { Label = "Toggle Auto Tame", StateKey = "AutoTame", Default = nil },
+    PerfectTame = { Label = "Toggle Perfect Tame", StateKey = "PerfectTame", Default = nil },
+    ESP = { Label = "Toggle ESP", StateKey = "ESP", Default = nil },
+    ESPTreesResources = { Label = "Toggle ESP Trees/Res", StateKey = "ESPTreesResources", Default = nil },
+    ESPFarmPlots = { Label = "Toggle ESP FarmPlots", StateKey = "ESPFarmPlots", Default = nil },
+    ESPTameables = { Label = "Toggle ESP Tameables", StateKey = "ESPTameables", Default = nil },
+    ESPCorpses = { Label = "Toggle ESP Corpses", StateKey = "ESPCorpses", Default = nil },
+    ESPStructures = { Label = "Toggle ESP Structures", StateKey = "ESPStructures", Default = nil },
+    ESPChests = { Label = "Toggle ESP Chests", StateKey = "ESPChests", Default = nil },
+    CFrameFly = { Label = "Toggle CFrame Fly", StateKey = "CFrameFly", Default = nil },
+    CFrameWalkSpeed = { Label = "Toggle CFrame WalkSpeed", StateKey = "CFrameWalkSpeedEnabled", Default = nil },
+    Noclip = { Label = "Toggle Noclip", StateKey = "Noclip", Default = nil },
+    ChestTP = { Label = "Toggle TP To Chests", StateKey = "ChestTP", Default = nil },
+    InstantPromptReact = { Label = "Toggle Prompt React", StateKey = "InstantPromptReact", Default = nil },
+    BringLogs = { Label = "Toggle Bring Logs", StateKey = "BringLogs", Default = nil },
+    LogOwnershipDrag = { Label = "Toggle Log Ownership", StateKey = "BringLogsUseDragOwnership", Default = nil }
+}
+
+local KeybindOrder = {
+    "ChopAura",
+    "MobAura",
+    "ItemBagAura",
+    "AutoTame",
+    "PerfectTame",
+    "ESP",
+    "ESPTreesResources",
+    "ESPFarmPlots",
+    "ESPTameables",
+    "ESPCorpses",
+    "ESPStructures",
+    "ESPChests",
+    "CFrameFly",
+    "CFrameWalkSpeed",
+    "Noclip",
+    "ChestTP",
+    "InstantPromptReact",
+    "BringLogs",
+    "LogOwnershipDrag"
+}
+
+local KeybindValues = {}
+for _, bindId in ipairs(KeybindOrder) do
+    KeybindValues[bindId] = KeybindConfig[bindId].Default
+end
+
+local function keyCodeToName(keyCode)
+    return keyCode and keyCode.Name or "NONE"
+end
+
+local function parseKeyCodeFromText(text)
+    local raw = tostring(text or "")
+    raw = raw:gsub("^%s+", ""):gsub("%s+$", "")
+    if raw == "" then
+        return nil, "empty"
+    end
+
+    local normalized = string.upper(raw:gsub("%s+", ""))
+    local aliases = {
+        CTRL = "LEFTCONTROL",
+        CONTROL = "LEFTCONTROL",
+        SHIFT = "LEFTSHIFT",
+        ALT = "LEFTALT",
+        SPACEBAR = "SPACE",
+        RETURN = "ENTER",
+        ESC = "ESCAPE"
+    }
+    normalized = aliases[normalized] or normalized
+
+    if normalized == "NONE" or normalized == "OFF" or normalized == "CLEAR" then
+        return false, nil
+    end
+
+    for _, keyCode in ipairs(Enum.KeyCode:GetEnumItems()) do
+        if string.upper(keyCode.Name) == normalized then
+            return keyCode, nil
+        end
+    end
+
+    return nil, "invalid"
+end
+
+local function notifyKeybind(message)
+    if ui then
+        ui.notify({
+            title = "Keybind",
+            message = message,
+            duration = 2.5
+        })
+    end
+end
+
+local function toggleStateByKeybind(bindId)
+    local cfg = KeybindConfig[bindId]
+    if not cfg then
+        return
+    end
+
+    local newState = not State[cfg.StateKey]
+    State[cfg.StateKey] = newState
+    notifyKeybind(cfg.Label .. ": " .. (newState and "ON" or "OFF"))
+end
+
+local function handleKeybindInput(keyCode)
+    for _, bindId in ipairs(KeybindOrder) do
+        if KeybindValues[bindId] == keyCode then
+            toggleStateByKeybind(bindId)
+            return true
+        end
+    end
+    return false
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then
+        return
+    end
+
+    setFlyInputState(input.KeyCode, true)
+
+    if UserInputService:GetFocusedTextBox() then
+        return
+    end
+
+    handleKeybindInput(input.KeyCode)
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    setFlyInputState(input.KeyCode, false)
+end)
+
+local function getFlyMoveDirection()
+    local currentCamera = Workspace.CurrentCamera
+    if not currentCamera then
+        return Vector3.new(0, 0, 0)
+    end
+
+    local dir = Vector3.new(0, 0, 0)
+    local look = currentCamera.CFrame.LookVector
+    local right = currentCamera.CFrame.RightVector
+
+    if FlyInput.W then
+        dir = dir + look
+    end
+    if FlyInput.S then
+        dir = dir - look
+    end
+    if FlyInput.D then
+        dir = dir + right
+    end
+    if FlyInput.A then
+        dir = dir - right
+    end
+    if FlyInput.Up then
+        dir = dir + Vector3.new(0, 1, 0)
+    end
+    if FlyInput.Down then
+        dir = dir - Vector3.new(0, 1, 0)
+    end
+
+    if dir.Magnitude > 1 then
+        dir = dir.Unit
+    end
+    return dir
+end
+
+-- =============================================================================
+-- Tool discovery
+-- =============================================================================
+local ToolCache = {
+    LastRefresh = 0,
+    Tools = {}
+}
+
+local function collectToolCandidates(container, out, seen, depth)
+    if not container or depth > 2 then
+        return
+    end
+
+    for _, child in ipairs(container:GetChildren()) do
+        if (child:IsA("Model") or child:IsA("Tool")) and not seen[child] then
+            local toolName = child:GetAttribute("ToolName")
+            local nameLower = lower(child.Name)
+            if toolName
+                or string.find(nameLower, "axe")
+                or string.find(nameLower, "chainsaw")
+                or string.find(nameLower, "flute")
+                or string.find(nameLower, "bag")
+            then
+                seen[child] = true
+                table.insert(out, child)
+            end
+        end
+
+        if child:IsA("Folder") then
+            collectToolCandidates(child, out, seen, depth + 1)
+        end
+    end
+end
+
+local function refreshToolCache(force)
+    local now = os.clock()
+    if not force and (now - ToolCache.LastRefresh) < 1 then
+        return
+    end
+
+    ToolCache.LastRefresh = now
+
+    local tools = {}
+    local seen = {}
+
+    collectToolCandidates(LocalPlayer:FindFirstChild("Inventory"), tools, seen, 0)
+    collectToolCandidates(LocalPlayer:FindFirstChildOfClass("Backpack"), tools, seen, 0)
+    collectToolCandidates(LocalPlayer.Character, tools, seen, 0)
+
+    ToolCache.Tools = tools
+end
+
+local function getToolName(tool)
+    local fromAttr = tool:GetAttribute("ToolName")
+    if typeof(fromAttr) == "string" and #fromAttr > 0 then
+        return fromAttr
+    end
+    return tool.Name
+end
+
+local function getToolScore(tool)
+    local tier = tonumber(tool:GetAttribute("ToolTier")) or 1
+    local resourceDamage = tonumber(tool:GetAttribute("WeaponResourceDamage"))
+    local damage = tonumber(tool:GetAttribute("WeaponDamage")) or 0
+    return tier * 1000 + (resourceDamage or damage)
+end
+
+local function findBestTool(predicate)
+    refreshToolCache(false)
+
+    local best = nil
+    local bestScore = -math.huge
+
+    for _, tool in ipairs(ToolCache.Tools) do
+        local toolName = getToolName(tool)
+        local nameLower = lower(toolName)
+        if predicate(tool, nameLower) then
+            local score = getToolScore(tool)
+            if score > bestScore then
+                best = tool
+                bestScore = score
+            end
+        end
+    end
+
+    return best
+end
+
+local function getBestDamageTool()
+    return findBestTool(function(_, nameLower)
+        return nameLower == "genericaxe"
+            or nameLower == "chainsaw"
+            or nameLower == "flamethrower"
+            or string.find(nameLower, "axe")
+            or string.find(nameLower, "chainsaw")
+    end)
+end
+
+local function getBestItemBagTool()
+    return findBestTool(function(_, nameLower)
+        return nameLower == "item bag" or string.find(nameLower, "bag")
+    end)
+end
+
+local function getBestFluteTool()
+    return findBestTool(function(_, nameLower)
+        return nameLower == "taming flute"
+            or nameLower == "admin taming flute"
+            or string.find(nameLower, "flute")
+    end)
+end
+
+-- =============================================================================
+-- Nearby-target helpers
+-- =============================================================================
+local NearbyParams = OverlapParams.new()
+NearbyParams.FilterType = Enum.RaycastFilterType.Exclude
+NearbyParams.MaxParts = 300
+
+local function getNearbyModels(radius)
+    local root = getRootPart()
+    if not root then
+        return {}, nil
+    end
+
+    local ignore = {}
+    if LocalPlayer.Character then
+        table.insert(ignore, LocalPlayer.Character)
+    end
+    local particles = Workspace:FindFirstChild("Particles")
+    if particles then
+        table.insert(ignore, particles)
+    end
+    NearbyParams.FilterDescendantsInstances = ignore
+
+    local results = {}
+    local ok, parts = pcall(function()
+        return Workspace:GetPartBoundsInRadius(root.Position, radius, NearbyParams)
+    end)
+
+    if ok and parts then
+        for _, part in ipairs(parts) do
+            local model = part:FindFirstAncestorOfClass("Model")
+            if model then
+                results[model] = true
+            end
+        end
+    end
+
+    return results, root.Position
+end
+
+local function getNearestModelByPredicate(radius, predicate)
+    local models, origin = getNearbyModels(radius)
+    if not origin then
+        return nil, nil
+    end
+
+    local bestModel = nil
+    local bestDist = nil
+
+    for model in pairs(models) do
+        if model and model.Parent and predicate(model) then
+            local pos = getInstancePosition(model)
+            if pos then
+                local dist = (pos - origin).Magnitude
+                if not bestDist or dist < bestDist then
+                    bestModel = model
+                    bestDist = dist
+                end
+            end
+        end
+    end
+
+    return bestModel, bestDist
+end
+
+local function getNearestModelsByPredicate(radius, predicate, maxCount)
+    local models, origin = getNearbyModels(radius)
+    if not origin then
+        return {}
+    end
+
+    local scored = {}
+    for model in pairs(models) do
+        if model and model.Parent and predicate(model) then
+            local pos = getInstancePosition(model)
+            if pos then
+                table.insert(scored, {
+                    Model = model,
+                    Dist = (pos - origin).Magnitude
+                })
+            end
+        end
+    end
+
+    table.sort(scored, function(a, b)
+        return a.Dist < b.Dist
+    end)
+
+    local limit = math.max(1, math.floor(maxCount or 1))
+    local result = {}
+    for i = 1, math.min(limit, #scored) do
+        result[i] = scored[i].Model
+    end
+
+    return result
+end
+
+-- =============================================================================
+-- Feature classifiers
+-- =============================================================================
+local function isDamageableResourceModel(model)
+    if not model or not model:IsA("Model") then
+        return false
+    end
+    if model:GetAttribute("Destroyed") then
+        return false
+    end
+    if model:GetAttribute("Health") ~= nil then
+        return true
+    end
+    if model:FindFirstChild("HitRegisters") then
+        return true
+    end
+    return false
+end
+
+local function isTreeTarget(model)
+    if not isDamageableResourceModel(model) then
+        return false
+    end
+
+    local resourceType = model:GetAttribute("Resource")
+    if resourceType and Config.SpecialResources[resourceType] then
+        return false
+    end
+
+    local modelName = lower(model.Name)
+    if string.find(modelName, "tree") then
+        return true
+    end
+    if resourceType and resourceType ~= "" then
+        return true
+    end
+
+    return false
+end
+
+local function isSpecialResourceTarget(model)
+    if not isDamageableResourceModel(model) then
+        return false
+    end
+
+    local resourceType = model:GetAttribute("Resource")
+    if resourceType and Config.SpecialResources[resourceType] then
+        return true
+    end
+
+    local modelName = lower(model.Name)
+    return string.find(modelName, "obsidiron")
+        or string.find(modelName, "meteor")
+        or string.find(modelName, "ice")
+end
+
+local function isBaggableModel(model)
+    if not model or not model:IsA("Model") then
+        return false
+    end
+    if model:GetAttribute("Destroyed") or model:GetAttribute("Ignited") then
+        return false
+    end
+    if model:GetAttribute("Interaction") == "NightPlant" then
+        return false
+    end
+    if CollectionService:HasTag(model, "ItemBag") then
+        return false
+    end
+
+    local itemsFolder = Workspace:FindFirstChild("Items")
+    local characters = Workspace:FindFirstChild("Characters")
+
+    if model.Parent == itemsFolder then
+        return true
+    end
+    if model.Parent == characters and model:GetAttribute("CanBeBagged") then
+        return true
+    end
+
+    return false
+end
+
+local function isTameableNpc(model)
+    if not model or not model:IsA("Model") then
+        return false
+    end
+    if not model.Parent then
+        return false
+    end
+    if not model:GetAttribute("CanBeTamed") then
+        return false
+    end
+    if model:GetAttribute("Tamed") then
+        return false
+    end
+    if model:GetAttribute("LocalTaming") then
+        return false
+    end
+
+    local inProgress = model:GetAttribute("TamingInProgress")
+    if inProgress and inProgress ~= LocalPlayer.UserId then
+        return false
+    end
+
+    return true
+end
+
+local function isMobTarget(model)
+    if not model or not model:IsA("Model") then
+        return false
+    end
+    if not model.Parent then
+        return false
+    end
+    if model:GetAttribute("Destroyed") then
+        return false
+    end
+
+    local hasNpcTag = CollectionService:HasTag(model, "NPC")
+    local hasNpcValue = model:FindFirstChild("NPC") ~= nil
+    if not hasNpcTag and not hasNpcValue then
+        return false
+    end
+
+    if State.MobAuraIgnoreTamed and model:GetAttribute("Tamed") then
+        return false
+    end
+    if State.MobAuraIgnoreNotAttackable and model:GetAttribute("NotAttackable") then
+        return false
+    end
+
+    local health = model:GetAttribute("Health")
+    if typeof(health) == "number" and health <= 0 then
+        return false
+    end
+
+    return true
+end
+
+-- =============================================================================
+-- Core actions
+-- =============================================================================
+local function getDamageAmount(toolModel, targetModel)
+    local isNpcTarget = CollectionService:HasTag(targetModel, "NPC") or targetModel:FindFirstChild("NPC")
+    local amount
+
+    if isNpcTarget then
+        amount = tonumber(toolModel:GetAttribute("WeaponDamage"))
+            or tonumber(toolModel:GetAttribute("WeaponResourceDamage"))
+            or 10
+    else
+        amount = tonumber(toolModel:GetAttribute("WeaponResourceDamage"))
+            or tonumber(toolModel:GetAttribute("WeaponDamage"))
+            or 10
+    end
+
+    local resourceType = targetModel:GetAttribute("Resource")
+    if resourceType == "IceBlock" then
+        local iceMultiplier = tonumber(toolModel:GetAttribute("IceDamageMultiplier"))
+        if iceMultiplier then
+            amount = amount * iceMultiplier
+        end
+    end
+
+    return amount
+end
+
+local function hitWithTool(targetModel)
+    local root = getRootPart()
+    if not root then
+        return
+    end
+
+    local toolModel = getBestDamageTool()
+    if not toolModel then
+        return
+    end
+
+    local amount = getDamageAmount(toolModel, targetModel)
+    local ok, result = callRemote("ToolDamageObject", targetModel, toolModel, amount, root.CFrame)
+    if ok and type(result) == "table" and result.Success == false then
+        -- Server rejected this hit, ignore quietly.
+    end
+end
+
+local BagCooldowns = {}
+local function tryBagNearest()
+    local bagTool = getBestItemBagTool()
+    if not bagTool then
+        return
+    end
+
+    local target = getNearestModelByPredicate(State.ItemBagRange, isBaggableModel)
+    if not target then
+        return
+    end
+
+    local now = os.clock()
+    if BagCooldowns[target] and BagCooldowns[target] > now then
+        return
+    end
+    BagCooldowns[target] = now + 1
+
+    local ok, result = callRemote("RequestBagStoreItem", bagTool, target)
+    if ok and type(result) == "table" and result.Success == false then
+        BagCooldowns[target] = now + 2
+    end
+end
+
+local TameCooldowns = {}
+local function getClosestTameableNpc(maxDistance)
+    local root = getRootPart()
+    if not root then
+        return nil
+    end
+
+    local origin = root.Position
+    local best = nil
+    local bestDist = nil
+    local seen = {}
+
+    local function considerNpc(npc)
+        if not npc or seen[npc] then
+            return
+        end
+        seen[npc] = true
+        if not isTameableNpc(npc) then
+            return
+        end
+
+        local pos = getInstancePosition(npc)
+        if not pos then
+            return
+        end
+
+        local dist = (pos - origin).Magnitude
+        if dist <= maxDistance and (not bestDist or dist < bestDist) then
+            best = npc
+            bestDist = dist
+        end
+    end
+
+    local characters = Workspace:FindFirstChild("Characters")
+    if characters then
+        for _, npc in ipairs(characters:GetChildren()) do
+            if npc:IsA("Model") then
+                considerNpc(npc)
+            end
+        end
+    end
+
+    for _, npc in ipairs(CollectionService:GetTagged("NPC")) do
+        considerNpc(npc)
+    end
+
+    local nearby = getNearbyModels(maxDistance + 12)
+    for model in pairs(nearby) do
+        considerNpc(model)
+    end
+
+    return best
+end
+
+local function tryAutoTame()
+    local flute = getBestFluteTool()
+    if not flute then
+        return
+    end
+
+    local npc = getClosestTameableNpc(State.AutoTameRange)
+    if not npc then
+        return
+    end
+
+    local now = os.clock()
+    if TameCooldowns[npc] and TameCooldowns[npc] > now then
+        return
+    end
+    TameCooldowns[npc] = now + 2
+
+    npc:SetAttribute("LocalTaming", true)
+    task.delay(2, function()
+        if npc and npc.Parent and npc:GetAttribute("LocalTaming") then
+            npc:SetAttribute("LocalTaming", nil)
+        end
+    end)
+
+    callRemote("RequestTame_Neutral", npc, flute)
+
+    if State.PerfectTame then
+        task.spawn(function()
+            local deadline = os.clock() + 1.6
+            local firedHungry = false
+
+            while State.AutoTame and npc and npc.Parent and flute and flute.Parent and os.clock() < deadline do
+                local inProgress = npc:GetAttribute("TamingInProgress")
+                if inProgress == nil or inProgress == LocalPlayer.UserId then
+                    task.wait(0.15)
+                    if State.AutoTame and npc and npc.Parent and flute and flute.Parent then
+                        callRemote("RequestTame_Hungry", npc, flute)
+                        firedHungry = true
+                    end
+                    break
+                end
+                task.wait(0.1)
+            end
+
+            if not firedHungry and State.AutoTame and npc and npc.Parent and flute and flute.Parent then
+                callRemote("RequestTame_Hungry", npc, flute)
+            end
+        end)
+    end
+end
+
+local LastChestTeleported = nil
+local function isChestName(name)
+    local normalized = lower(name):gsub("[^%w]", "")
+    if normalized == "itemchest" then
+        return true
+    end
+
+    local suffix = string.match(normalized, "^itemchest(%d+)$")
+    if suffix then
+        local chestIndex = tonumber(suffix)
+        return chestIndex ~= nil and chestIndex >= 1 and chestIndex <= 5
+    end
+
+    return false
+end
+
+local function isChestTargetInstance(item)
+    if not item or not (item:IsA("Model") or item:IsA("BasePart")) then
+        return false
+    end
+    if item:GetAttribute("Destroyed") then
+        return false
+    end
+    return isChestName(item.Name)
+end
+
+local function collectChestTargets()
+    local itemsFolder = Workspace:FindFirstChild("Items")
+    if not itemsFolder then
+        return {}
+    end
+
+    local chests = {}
+    for _, item in ipairs(itemsFolder:GetChildren()) do
+        if isChestTargetInstance(item) then
+            table.insert(chests, item)
+        end
+    end
+    return chests
+end
+
+local function pickNextChestTarget(chests)
+    if #chests == 0 then
+        return nil
+    end
+    if #chests == 1 then
+        return chests[1]
+    end
+
+    local pool = {}
+    for _, chest in ipairs(chests) do
+        if chest ~= LastChestTeleported then
+            table.insert(pool, chest)
+        end
+    end
+    if #pool == 0 then
+        pool = chests
+    end
+
+    return pool[math.random(1, #pool)]
+end
+
+local function teleportToNextChest()
+    local root = getRootPart()
+    if not root then
+        return false
+    end
+
+    local chests = collectChestTargets()
+    local chest = pickNextChestTarget(chests)
+    if not chest then
+        return false
+    end
+
+    local chestPos = getInstancePosition(chest)
+    if not chestPos then
+        return false
+    end
+
+    local targetPos = chestPos + Vector3.new(0, 4, 0)
+    pcall(function()
+        root.CFrame = CFrame.new(targetPos)
+    end)
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+    LastChestTeleported = chest
+    return true
+end
+
+-- =============================================================================
+-- ESP
+-- =============================================================================
+local ESP = {
+    Tracked = {},
+    FrameCounter = 0
+}
+
+local function createEspNode(instance, category)
+    local adornee = getModelAdornee(instance)
+    if not adornee then
+        return nil
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "Focus_ESP_Node"
+    billboard.Adornee = adornee
+    billboard.Size = UDim2.new(0, 180, 0, 72)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = false
+
+    pcall(function()
+        billboard.Parent = CoreGui
+    end)
+    if not billboard.Parent then
+        billboard.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundColor3 = Config.ESPColors.Background
+    frame.BackgroundTransparency = 0.35
+    frame.BorderSizePixel = 0
+    frame.Parent = billboard
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = frame
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -10, 1, -10)
+    label.Position = UDim2.new(0, 5, 0, 5)
+    label.BackgroundTransparency = 1
+    label.TextWrapped = true
+    label.RichText = true
+    label.Font = Enum.Font.Code
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Top
+    label.TextColor3 = Config.ESPColors[category] or Color3.new(1, 1, 1)
+    label.Parent = frame
+
+    return {
+        Instance = instance,
+        Category = category,
+        Billboard = billboard,
+        Label = label
+    }
+end
+
+local function removeEspNode(instance)
+    local data = ESP.Tracked[instance]
+    if not data then
+        return
+    end
+
+    if data.Billboard then
+        data.Billboard:Destroy()
+    end
+    ESP.Tracked[instance] = nil
+end
+
+local function updateEspText(data, distance)
+    local model = data.Instance
+    local categoryText = Config.ESPLabels[data.Category] or data.Category
+    local title = tostring(model.Name)
+
+    local extras = {}
+    local resourceType = model:GetAttribute("Resource")
+    if resourceType then
+        table.insert(extras, tostring(resourceType))
+    end
+
+    local hp = model:GetAttribute("Health")
+    if typeof(hp) == "number" then
+        table.insert(extras, "HP " .. math.floor(hp))
+    end
+
+    if model:GetAttribute("CanBeTamed") and not model:GetAttribute("Tamed") then
+        table.insert(extras, "Can tame")
+    end
+
+    local info = categoryText .. " | " .. math.floor(distance) .. "m"
+    if #extras > 0 then
+        info = info .. "\n" .. table.concat(extras, " | ")
+    end
+
+    data.Label.TextColor3 = Config.ESPColors[data.Category] or Color3.new(1, 1, 1)
+    data.Label.Text = string.format("<b>%s</b>\n%s", title, info)
+end
+
+local function addEspTarget(targets, instance, category, origin)
+    if not instance or not instance.Parent then
+        return
+    end
+
+    local pos = getInstancePosition(instance)
+    if not pos then
+        return
+    end
+
+    if (pos - origin).Magnitude <= State.ESPDistance then
+        targets[instance] = category
+    end
+end
+
+local function refreshEspTargets()
+    if not State.ESP then
+        for instance in pairs(ESP.Tracked) do
+            removeEspNode(instance)
+        end
+        return
+    end
+
+    local root = getRootPart()
+    if not root then
+        return
+    end
+    local origin = root.Position
+
+    local targets = {}
+
+    if State.ESPTreesResources then
+        local characters = Workspace:FindFirstChild("Characters")
+        if characters then
+            for _, model in ipairs(characters:GetChildren()) do
+                if model:IsA("Model") and (isTreeTarget(model) or isSpecialResourceTarget(model)) then
+                    addEspTarget(targets, model, "TreeResource", origin)
+                end
+            end
+        end
+
+        local nearby = getNearbyModels(State.ESPDistance + 50)
+        for model in pairs(nearby) do
+            if isTreeTarget(model) or isSpecialResourceTarget(model) then
+                addEspTarget(targets, model, "TreeResource", origin)
+            end
+        end
+    end
+
+    if State.ESPFarmPlots then
+        for _, plot in ipairs(CollectionService:GetTagged("FarmPlot")) do
+            addEspTarget(targets, plot, "FarmPlot", origin)
+        end
+    end
+
+    if State.ESPTameables then
+        for _, npc in ipairs(CollectionService:GetTagged("NPC")) do
+            if isTameableNpc(npc) then
+                addEspTarget(targets, npc, "Tameable", origin)
+            end
+        end
+    end
+
+    if State.ESPCorpses then
+        for _, corpse in ipairs(CollectionService:GetTagged("CultistCorpse")) do
+            if corpse:IsA("Model") and not corpse:GetAttribute("Resurrected") then
+                addEspTarget(targets, corpse, "Corpse", origin)
+            end
+        end
+    end
+
+    if State.ESPStructures then
+        for _, struct in ipairs(CollectionService:GetTagged("CanBePickedUp")) do
+            addEspTarget(targets, struct, "Structure", origin)
+        end
+        for _, struct in ipairs(CollectionService:GetTagged("Colourable")) do
+            addEspTarget(targets, struct, "Structure", origin)
+        end
+    end
+
+    if State.ESPChests then
+        local itemsFolder = Workspace:FindFirstChild("Items")
+        if itemsFolder then
+            for _, item in ipairs(itemsFolder:GetChildren()) do
+                if isChestTargetInstance(item) then
+                    addEspTarget(targets, item, "Chest", origin)
+                end
+            end
+        end
+    end
+
+    for instance, category in pairs(targets) do
+        local tracked = ESP.Tracked[instance]
+        if not tracked then
+            tracked = createEspNode(instance, category)
+            if tracked then
+                ESP.Tracked[instance] = tracked
+            end
+        else
+            tracked.Category = category
+            local newAdornee = getModelAdornee(instance)
+            if newAdornee then
+                tracked.Billboard.Adornee = newAdornee
+            end
+        end
+    end
+
+    for instance in pairs(ESP.Tracked) do
+        if not targets[instance] then
+            removeEspNode(instance)
+        end
+    end
+end
+
+-- =============================================================================
+-- UI setup (same style as Fishmain)
+-- =============================================================================
+local uiLoader = loadstring(game:HttpGet("https://raw.githubusercontent.com/topitbopit/dollarware/main/library.lua"))
+ui = uiLoader({
+    rounding = true,
+    theme = "blueberry",
+    smoothDragging = true
+})
+ui.autoDisableToggles = true
+
+local window = ui.newWindow({
+    text = "Focus",
+    resize = true,
+    size = Vector2.new(680, 500)
+})
+
+local auraMenu = window:addMenu({ text = "Auras" })
+
+local chopSection = auraMenu:addSection({ text = "Chop Aura", side = "left" })
+chopSection:addToggle({ text = "ChopTree Aura", state = false }, function(v)
+    State.ChopTreeAura = v
+end)
+chopSection:addSlider({
+    text = "Chop Range",
+    min = 6,
+    max = 30,
+    step = 1,
+    val = 16
+}, function(v)
+    State.ChopRange = v
+end)
+chopSection:addSlider({
+    text = "Chop Interval",
+    min = 0.05,
+    max = 1.0,
+    step = 0.05,
+    val = 0.2
+}, function(v)
+    State.ChopInterval = v
+end)
+chopSection:addSlider({
+    text = "Chop Targets/Tick",
+    min = 1,
+    max = 15,
+    step = 1,
+    val = 3
+}, function(v)
+    State.ChopTargets = v
+end)
+
+local mobSection = auraMenu:addSection({ text = "Mob KillAura", side = "right" })
+mobSection:addToggle({ text = "Enable Mob Aura", state = false }, function(v)
+    State.MobAura = v
+end)
+mobSection:addSlider({
+    text = "Mob Range",
+    min = 6,
+    max = 35,
+    step = 1,
+    val = 16
+}, function(v)
+    State.MobAuraRange = v
+end)
+mobSection:addSlider({
+    text = "Mob Interval",
+    min = 0.05,
+    max = 1.0,
+    step = 0.05,
+    val = 0.15
+}, function(v)
+    State.MobAuraInterval = v
+end)
+mobSection:addSlider({
+    text = "Mob Targets/Tick",
+    min = 1,
+    max = 15,
+    step = 1,
+    val = 3
+}, function(v)
+    State.MobAuraTargets = v
+end)
+mobSection:addToggle({ text = "Ignore Tamed", state = true }, function(v)
+    State.MobAuraIgnoreTamed = v
+end)
+mobSection:addToggle({ text = "Ignore NotAttackable", state = true }, function(v)
+    State.MobAuraIgnoreNotAttackable = v
+end)
+
+local bagSection = auraMenu:addSection({ text = "Item Bag Aura", side = "right" })
+bagSection:addToggle({ text = "Enable Item Bag Aura", state = false }, function(v)
+    State.ItemBagAura = v
+end)
+bagSection:addSlider({
+    text = "Bag Range",
+    min = 6,
+    max = 30,
+    step = 1,
+    val = 16
+}, function(v)
+    State.ItemBagRange = v
+end)
+bagSection:addSlider({
+    text = "Bag Interval",
+    min = 0.05,
+    max = 1.0,
+    step = 0.05,
+    val = 0.3
+}, function(v)
+    State.ItemBagInterval = v
+end)
+
+local movementMenu = window:addMenu({ text = "Movement" })
+local movementSection = movementMenu:addSection({ text = "CFrame", side = "auto" })
+movementSection:addToggle({ text = "CFrame Fly", state = false }, function(v)
+    State.CFrameFly = v
+end):setTooltip("WASD to move, Space/E up, Q/Ctrl/Shift down.")
+movementSection:addSlider({
+    text = "Fly Speed",
+    min = 10,
+    max = 300,
+    step = 5,
+    val = 75
+}, function(v)
+    State.CFrameFlySpeed = v
+end)
+movementSection:addToggle({ text = "CFrame WalkSpeed", state = false }, function(v)
+    State.CFrameWalkSpeedEnabled = v
+end)
+movementSection:addSlider({
+    text = "WalkSpeed",
+    min = 16,
+    max = 250,
+    step = 1,
+    val = 28
+}, function(v)
+    State.CFrameWalkSpeed = v
+end)
+movementSection:addToggle({ text = "Noclip", state = false }, function(v)
+    State.Noclip = v
+end)
+
+local utilityMenu = window:addMenu({ text = "Utility" })
+local utilitySection = utilityMenu:addSection({ text = "Player / Logs", side = "auto" })
+utilitySection:addToggle({ text = "TP To Chests", state = false }, function(v)
+    State.ChestTP = v
+    if not v then
+        LastChestTeleported = nil
+    end
+end):setTooltip("Teleports to Item Chests and avoids repeating the last one.")
+utilitySection:addSlider({
+    text = "Chest TP Interval",
+    min = 0.15,
+    max = 5.0,
+    step = 0.05,
+    val = 1.2
+}, function(v)
+    State.ChestTPInterval = v
+end)
+utilitySection:addToggle({ text = "Instant Prompt React", state = false }, function(v)
+    State.InstantPromptReact = v
+end):setTooltip("Instantly triggers visible proximity prompts.")
+utilitySection:addSlider({
+    text = "Prompt React Interval",
+    min = 0.02,
+    max = 0.5,
+    step = 0.01,
+    val = 0.08
+}, function(v)
+    State.PromptReactInterval = v
+end)
+utilitySection:addToggle({ text = "Bring Logs", state = false }, function(v)
+    State.BringLogs = v
+end):setTooltip("Moves log objects from workspace.Items (Log/Logs/descendants) to you.")
+utilitySection:addSlider({
+    text = "Log Interval",
+    min = 0.05,
+    max = 1.0,
+    step = 0.05,
+    val = 0.25
+}, function(v)
+    State.BringLogsInterval = v
+end)
+utilitySection:addSlider({
+    text = "Log Range",
+    min = 50,
+    max = 1200,
+    step = 25,
+    val = 350
+}, function(v)
+    State.BringLogsRange = v
+end)
+utilitySection:addSlider({
+    text = "Logs / Tick",
+    min = 1,
+    max = 100,
+    step = 1,
+    val = 20
+}, function(v)
+    State.BringLogsPerTick = v
+end)
+utilitySection:addSlider({
+    text = "Log Spread",
+    min = 1,
+    max = 25,
+    step = 1,
+    val = 8
+}, function(v)
+    State.BringLogsSpread = v
+end)
+utilitySection:addToggle({ text = "Log Ownership Drag", state = true }, function(v)
+    State.BringLogsUseDragOwnership = v
+end):setTooltip("Uses RequestStartDraggingItem and waits before moving logs.")
+utilitySection:addSlider({
+    text = "Ownership Hold (s)",
+    min = 0.2,
+    max = 2.0,
+    step = 0.1,
+    val = 1.1
+}, function(v)
+    State.BringLogsHoldTime = v
+end)
+
+local keybindMenu = window:addMenu({ text = "Keybinds" })
+local keybindAuraSection = keybindMenu:addSection({ text = "Aura / Combat", side = "left" })
+local keybindUtilitySection = keybindMenu:addSection({ text = "Movement / Utility", side = "right" })
+local keybindESPSection = keybindMenu:addSection({ text = "ESP", side = "left" })
+
+local function addKeybindEditor(section, bindId)
+    local cfg = KeybindConfig[bindId]
+    if not cfg then
+        return
+    end
+
+    local editor = section:addTextbox({ text = cfg.Label .. " Key" })
+    local function updateTooltip()
+        editor:setTooltip("Current: " .. keyCodeToName(KeybindValues[bindId]) .. " | Type key name or NONE")
+    end
+    updateTooltip()
+
+    editor:bindToEvent("onFocusLost", function(text)
+        local parsed, err = parseKeyCodeFromText(text)
+        if err == "empty" then
+            return
+        end
+        if err == "invalid" then
+            notifyKeybind("Invalid key for " .. cfg.Label)
+            return
+        end
+
+        if parsed == false then
+            KeybindValues[bindId] = nil
+            notifyKeybind(cfg.Label .. " key: NONE")
+        else
+            KeybindValues[bindId] = parsed
+            notifyKeybind(cfg.Label .. " key: " .. parsed.Name)
+        end
+        updateTooltip()
+    end)
+end
+
+addKeybindEditor(keybindAuraSection, "ChopAura")
+addKeybindEditor(keybindAuraSection, "MobAura")
+addKeybindEditor(keybindAuraSection, "ItemBagAura")
+addKeybindEditor(keybindAuraSection, "AutoTame")
+addKeybindEditor(keybindAuraSection, "PerfectTame")
+addKeybindEditor(keybindAuraSection, "ESP")
+addKeybindEditor(keybindESPSection, "ESPTreesResources")
+addKeybindEditor(keybindESPSection, "ESPFarmPlots")
+addKeybindEditor(keybindESPSection, "ESPTameables")
+addKeybindEditor(keybindESPSection, "ESPCorpses")
+addKeybindEditor(keybindESPSection, "ESPStructures")
+addKeybindEditor(keybindESPSection, "ESPChests")
+addKeybindEditor(keybindUtilitySection, "CFrameFly")
+addKeybindEditor(keybindUtilitySection, "CFrameWalkSpeed")
+addKeybindEditor(keybindUtilitySection, "Noclip")
+addKeybindEditor(keybindUtilitySection, "ChestTP")
+addKeybindEditor(keybindUtilitySection, "InstantPromptReact")
+addKeybindEditor(keybindUtilitySection, "BringLogs")
+addKeybindEditor(keybindUtilitySection, "LogOwnershipDrag")
+
+local tameMenu = window:addMenu({ text = "Taming" })
+local tameSection = tameMenu:addSection({ text = "Auto Tame", side = "auto" })
+tameSection:addToggle({ text = "Enable Auto Tame", state = false }, function(v)
+    State.AutoTame = v
+end)
+tameSection:addToggle({ text = "Perfect Tame (Auto Finish)", state = true }, function(v)
+    State.PerfectTame = v
+end)
+tameSection:addSlider({
+    text = "Tame Range",
+    min = 8,
+    max = 30,
+    step = 1,
+    val = 20
+}, function(v)
+    State.AutoTameRange = v
+end)
+tameSection:addSlider({
+    text = "Tame Interval",
+    min = 0.2,
+    max = 2.0,
+    step = 0.1,
+    val = 1.0
+}, function(v)
+    State.AutoTameInterval = v
+end)
+
+local espMenu = window:addMenu({ text = "ESP" })
+local espMain = espMenu:addSection({ text = "General", side = "left" })
+espMain:addToggle({ text = "Enable ESP", state = false }, function(v)
+    State.ESP = v
+    if not v then
+        for _, data in pairs(ESP.Tracked) do
+            data.Billboard.Enabled = false
+        end
+    end
+end)
+espMain:addSlider({
+    text = "ESP Max Distance",
+    min = 50,
+    max = 450,
+    step = 10,
+    val = 220
+}, function(v)
+    State.ESPDistance = v
+end)
+
+local espCats = espMenu:addSection({ text = "Categories", side = "right" })
+espCats:addToggle({ text = "Trees / Resources", state = true }, function(v)
+    State.ESPTreesResources = v
+end)
+espCats:addToggle({ text = "Farm Plots", state = true }, function(v)
+    State.ESPFarmPlots = v
+end)
+espCats:addToggle({ text = "Tameable NPCs", state = true }, function(v)
+    State.ESPTameables = v
+end)
+espCats:addToggle({ text = "Corpses", state = true }, function(v)
+    State.ESPCorpses = v
+end)
+espCats:addToggle({ text = "Structures", state = true }, function(v)
+    State.ESPStructures = v
+end)
+espCats:addToggle({ text = "Chests", state = true }, function(v)
+    State.ESPChests = v
+end)
+
+-- =============================================================================
+-- Runtime engines
+-- =============================================================================
+local Timers = {
+    Chop = 0,
+    Mob = 0,
+    Bag = 0,
+    Tame = 0,
+    PromptReact = 0,
+    ChestTP = 0,
+    Logs = 0,
+    EspScan = 0
+}
+
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+
+    if State.ChopTreeAura and (now - Timers.Chop) >= State.ChopInterval then
+        Timers.Chop = now
+        local targets = getNearestModelsByPredicate(State.ChopRange, isTreeTarget, State.ChopTargets)
+        for _, target in ipairs(targets) do
+            hitWithTool(target)
+        end
+    end
+
+    if State.MobAura and (now - Timers.Mob) >= State.MobAuraInterval then
+        Timers.Mob = now
+        local targets = getNearestModelsByPredicate(State.MobAuraRange, isMobTarget, State.MobAuraTargets)
+        for _, target in ipairs(targets) do
+            hitWithTool(target)
+        end
+    end
+
+    if State.ItemBagAura and (now - Timers.Bag) >= State.ItemBagInterval then
+        Timers.Bag = now
+        tryBagNearest()
+    end
+
+    if State.AutoTame and (now - Timers.Tame) >= State.AutoTameInterval then
+        Timers.Tame = now
+        tryAutoTame()
+    end
+
+    if State.InstantPromptReact and (now - Timers.PromptReact) >= State.PromptReactInterval then
+        Timers.PromptReact = now
+        reactToActivePrompts(now)
+    end
+
+    if State.ChestTP and (now - Timers.ChestTP) >= State.ChestTPInterval then
+        Timers.ChestTP = now
+        teleportToNextChest()
+    end
+
+    if State.BringLogs and (now - Timers.Logs) >= State.BringLogsInterval then
+        Timers.Logs = now
+        bringNearbyLogs()
+    elseif not State.BringLogs and next(LogDragStates) ~= nil then
+        releaseAllLogDrags()
+    end
+
+    if State.ESP and (now - Timers.EspScan) >= 1.0 then
+        Timers.EspScan = now
+        refreshEspTargets()
+    end
+end)
+
+local FlyWasApplied = false
+local NoclipCache = {}
+local function applyNoclip()
+    local character = LocalPlayer.Character
+    if not character then
+        return
+    end
+
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if NoclipCache[part] == nil then
+                NoclipCache[part] = part.CanCollide
+            end
+            part.CanCollide = false
+        end
+    end
+end
+
+local function restoreNoclip()
+    for part, wasCollidable in pairs(NoclipCache) do
+        if part and part.Parent then
+            part.CanCollide = wasCollidable
+        end
+    end
+    NoclipCache = {}
+end
+
+RunService.RenderStepped:Connect(function(deltaTime)
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+    if State.Noclip then
+        applyNoclip()
+    elseif next(NoclipCache) ~= nil then
+        restoreNoclip()
+    end
+
+    if State.CFrameFly and root then
+        local direction = getFlyMoveDirection()
+        if humanoid then
+            humanoid.PlatformStand = true
+        end
+        FlyWasApplied = true
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        if direction.Magnitude > 0 then
+            root.CFrame = root.CFrame + direction * State.CFrameFlySpeed * deltaTime
+        end
+    elseif FlyWasApplied then
+        if humanoid then
+            humanoid.PlatformStand = false
+        end
+        FlyWasApplied = false
+    end
+
+    if State.CFrameWalkSpeedEnabled and not State.CFrameFly and root and humanoid then
+        local moveDir = humanoid.MoveDirection
+        if moveDir.Magnitude > 0 then
+            local flatMove = Vector3.new(moveDir.X, 0, moveDir.Z)
+            if flatMove.Magnitude > 0 then
+                root.CFrame = root.CFrame + flatMove.Unit * State.CFrameWalkSpeed * deltaTime
+            end
+        end
+    end
+
+    if not State.ESP then
+        for _, data in pairs(ESP.Tracked) do
+            data.Billboard.Enabled = false
+        end
+        return
+    end
+
+    local rootPos = root and root.Position
+    if not rootPos then
+        return
+    end
+
+    ESP.FrameCounter = ESP.FrameCounter + 1
+    local refreshText = (ESP.FrameCounter % 10) == 0
+
+    for instance, data in pairs(ESP.Tracked) do
+        if not instance or not instance.Parent then
+            removeEspNode(instance)
+        else
+            local pos = getInstancePosition(instance)
+            if not pos then
+                removeEspNode(instance)
+            else
+                local distance = (pos - rootPos).Magnitude
+                data.Billboard.Enabled = distance <= State.ESPDistance
+                if refreshText then
+                    updateEspText(data, distance)
+                end
+            end
+        end
+    end
+end)
+
+ui.notify({
+    title = "Loaded",
+    message = "Focus loaded (Auras + Logs + Movement + Keybinds + ESP).",
+    duration = 4
+})
