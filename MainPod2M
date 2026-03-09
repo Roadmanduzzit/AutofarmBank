@@ -1,8 +1,8 @@
 -- // ========================================== //
--- //    FOCUSHUB NATIVE (BIG MOBILE EDITION)    //
+-- //      Focus Premium Hub       //
 -- // ========================================== //
 
--- [[ 1. ANTI-CHEAT BYPASS ]] --
+-- [[ 1. ADONIS BYPASS ]] --
 local g = getinfo or debug.getinfo
 local x, y
 setthreadidentity(2)
@@ -20,52 +20,408 @@ for i, v in getgc(true) do
         end
     end
 end
-local o; o = hookfunction(getrenv().debug.info, newcclosure(function(...)
+local o;
+o = hookfunction(getrenv().debug.info, newcclosure(function(...)
     local a, f = ...
     if x and a == x then return coroutine.yield(coroutine.running()) end
     return o(...)
 end))
 setthreadidentity(7)
 
--- [[ 2. SERVICES ]] --
+-- [[ 2. SERVICES & VARIABLES ]] --
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local VirtualUser = game:GetService("VirtualUser")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local VirtualUser = nil
+local VirtualInputManager = nil
+pcall(function()
+    VirtualUser = game:GetService("VirtualUser")
+end)
+pcall(function()
+    VirtualInputManager = game:GetService("VirtualInputManager")
+end)
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
--- [[ 3. CONFIGURATION ]] --
-local Config = {
-    SilentAim = { Enabled = false, FOV = 200, ShowFOV = false, HitChance = 100, TargetPart = "Head", WallCheck = true, Visuals = false },
-    Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, MaxDist = 2000 },
-    Movement = { SlideEnabled = false, SlideSpeed = 45, FlyEnabled = false, FlySpeed = 45, Noclip = false },
+-- Global Config
+local DefaultConfig = {
+    SilentAim = {
+        Enabled = false,
+        FOV = 200,
+        ShowFOV = false,
+        HitChance = 100,
+        TargetPart = "Head",
+        WallCheck = true,
+        Visuals = false
+    },
+    Visuals = { Enabled = false, Box = false, Name = false, Health = false, Tool = false, Tracer = false, MaxDist = 2500 },
+    Movement = {
+        SlideEnabled = false,
+        SlideSpeed = 45,
+        FlyEnabled = false,
+        FlySpeed = 45,
+        Noclip = false
+    },
     Combat = { InfAmmo = false, RapidFire = false, NoRecoil = false },
-    Autofarm = { Enabled = false, Speed = 30, WaitTime = 2, Offset = Vector3.new(0,3,0) },
-    Misc = { InfStamina = false, CashPickup = false, PickupRange = 30, AntiAFK = false }
+    Autofarm = {
+        Enabled = false,
+        Speed = 30,
+        AirdropEnabled = false,
+        AirdropKillRadius = 75,
+        AirdropServerHopEnabled = false
+    },
+    Vehicle = {
+        Enabled = false,
+        SpeedMult = 1,
+        AccelMult = 1,
+        BrakeMult = 1,
+        SteerMult = 1,
+        NoCrashDamage = true
+    },
+    Misc = {
+        InfStamina = false,
+        CashPickup = false,
+        PickupRange = 25,
+        LootMagnet = false,
+        LootRange = 30,
+        ModDetection = false,
+        AntiAFK = false
+    }
 }
+
+local function DeepCopy(source)
+    local copy = {}
+    for key, value in pairs(source) do
+        if typeof(value) == "table" then
+            copy[key] = DeepCopy(value)
+        else
+            copy[key] = value
+        end
+    end
+    return copy
+end
+
+local function MergeWithDefaults(defaults, loaded)
+    if typeof(defaults) ~= "table" then
+        if typeof(loaded) == typeof(defaults) then
+            return loaded
+        end
+        return defaults
+    end
+
+    local merged = {}
+    local loadedTable = typeof(loaded) == "table" and loaded or nil
+    for key, defaultValue in pairs(defaults) do
+        local loadedValue = loadedTable and loadedTable[key] or nil
+        merged[key] = MergeWithDefaults(defaultValue, loadedValue)
+    end
+    return merged
+end
+
+local function ClampConfigValues(cfg)
+    cfg.SilentAim.FOV = math.clamp(cfg.SilentAim.FOV, 10, 500)
+    cfg.SilentAim.HitChance = math.clamp(cfg.SilentAim.HitChance, 0, 100)
+    cfg.Visuals.MaxDist = math.clamp(cfg.Visuals.MaxDist, 100, 5000)
+    cfg.Movement.SlideSpeed = math.clamp(cfg.Movement.SlideSpeed, 16, 45)
+    cfg.Movement.FlySpeed = math.clamp(cfg.Movement.FlySpeed, 16, 45)
+    cfg.Autofarm.Speed = math.clamp(cfg.Autofarm.Speed, 10, 30)
+    cfg.Autofarm.AirdropKillRadius = math.clamp(cfg.Autofarm.AirdropKillRadius, 15, 250)
+    cfg.Vehicle.SpeedMult = math.clamp(cfg.Vehicle.SpeedMult, 1, 10)
+    cfg.Vehicle.AccelMult = math.clamp(cfg.Vehicle.AccelMult, 1, 5)
+    cfg.Vehicle.BrakeMult = math.clamp(cfg.Vehicle.BrakeMult, 1, 5)
+    cfg.Vehicle.SteerMult = math.clamp(cfg.Vehicle.SteerMult, 1, 5)
+    cfg.Vehicle.NoCrashDamage = cfg.Vehicle.NoCrashDamage ~= false
+    cfg.Misc.PickupRange = math.clamp(cfg.Misc.PickupRange, 1, 50)
+    cfg.Misc.LootRange = math.clamp(cfg.Misc.LootRange, 5, 50)
+    cfg.Misc.ModDetection = cfg.Misc.ModDetection == true
+    cfg.Misc.AntiAFK = cfg.Misc.AntiAFK == true
+    return cfg
+end
+
+local Config = ClampConfigValues(DeepCopy(DefaultConfig))
 
 -- Logic Variables
 local ESP_Storage = {}
 local Movers = { SlideBV = nil, SlideBG = nil, FlyBV = nil, FlyBG = nil }
 local MoveKeys = {[Enum.KeyCode.W]=false, [Enum.KeyCode.A]=false, [Enum.KeyCode.S]=false, [Enum.KeyCode.D]=false}
-local CurrentHighlight, CurrentTarget = nil, nil
 local NoclipConnection = nil
+local AutofarmTicket = 0
+local FeatureCooldowns = {
+    Loot = 0,
+    Vehicle = 0,
+    ModDetection = 0
+}
+local AirdropAutofarmTicket = 0
+local AirdropLockConnection = nil
+local LockedAirdropPart = nil
+local AirdropKillTasks = {}
+local LastAirdropPromptTick = 0
+local LastAirdropLootSweepTick = 0
+local AirdropServerHopTicket = 0
+local AirdropServerHopBusy = false
+local AirdropKillActiveCount = 0
+local LootClientSessionActive = false
+local VehicleModsActive = false
+local VehicleOriginalValueObjects = {}
+local VehicleOriginalAttributes = {}
+local VehicleOriginalSeatProperties = {}
+local VehicleCrashState = {
+    Seat = nil,
+    Humanoid = nil,
+    OriginalBreakJointsOnDeath = nil,
+    LastTick = 0,
+    LastSpeed = 0,
+    LastHealth = 0
+}
+local VehicleCrashConnection = nil
+local VehicleCrashDeathConnection = nil
+local ModDetectionFlaggedUsers = {}
+local ModDetectionRoleCache = {}
+local ModDetectionScriptAccessLoaded = false
+local ModDetectionKnownPrivilegedNames = {
+    ["fntdrippy"] = true,
+    ["fntcloutreborn"] = true,
+    ["awe7omeness"] = true
+}
 
--- Visuals (Silent Aim)
+-- Silent Aim Visuals
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Color = Color3.fromRGB(255, 0, 80)
-FOVCircle.Thickness = 1.5; FOVCircle.NumSides = 64; FOVCircle.Filled = false; FOVCircle.Visible = false
+FOVCircle.Thickness = 1.5
+FOVCircle.NumSides = 64
+FOVCircle.Filled = false
+FOVCircle.Visible = false
 
--- [[ 4. LOGIC FUNCTIONS ]] --
+local CurrentHighlight = nil
+local CurrentTarget = nil
+local CurrentTargetPart = nil
+local Controls = {}
 
--- > SILENT AIM LOGIC
+local ActiveConfigName = "default"
+local ApplyConfigToControls = function() end
+
+local CONFIG_FOLDER = "FocusConfigs"
+local LAST_CONFIG_FILE = CONFIG_FOLDER .. "/last.txt"
+local FALLBACK_FILE_PREFIX = "focus_config_"
+local FALLBACK_LAST_FILE = "focus_last.txt"
+
+local function SupportsFolderApi()
+    return typeof(isfolder) == "function" and typeof(makefolder) == "function"
+end
+
+local function SafeUnit(vector)
+    if vector.Magnitude > 0 then
+        return vector.Unit
+    end
+    return Vector3.zero
+end
+
+local function GetCamera()
+    return Workspace.CurrentCamera or Camera
+end
+
+local function GetCharacter()
+    return LocalPlayer.Character
+end
+
+local function GetHumanoidAndRoot(character)
+    if not character then
+        return nil, nil
+    end
+    return character:FindFirstChildOfClass("Humanoid"), character:FindFirstChild("HumanoidRootPart")
+end
+
+local function NormalizeConfigName(name)
+    local cleaned = tostring(name or ""):lower()
+    cleaned = cleaned:gsub("%s+", "_")
+    cleaned = cleaned:gsub("[^%w_.-]", "")
+    if cleaned == "" then
+        cleaned = "default"
+    end
+    return cleaned:sub(1, 32)
+end
+
+local function BuildConfigPath(name)
+    local normalized = NormalizeConfigName(name)
+    if SupportsFolderApi() then
+        return string.format("%s/%s.json", CONFIG_FOLDER, normalized)
+    end
+    return string.format("%s%s.json", FALLBACK_FILE_PREFIX, normalized)
+end
+
+local function GetLastConfigPath()
+    if SupportsFolderApi() then
+        return LAST_CONFIG_FILE
+    end
+    return FALLBACK_LAST_FILE
+end
+
+local function EnsureConfigFolder()
+    if not SupportsFolderApi() then
+        return true
+    end
+
+    local existsOk, exists = pcall(isfolder, CONFIG_FOLDER)
+    if not existsOk then
+        return false, tostring(exists)
+    end
+
+    if not exists then
+        local makeOk, makeErr = pcall(makefolder, CONFIG_FOLDER)
+        if not makeOk then
+            return false, tostring(makeErr)
+        end
+    end
+
+    return true
+end
+
+local function ReadFileSafe(path)
+    if typeof(readfile) ~= "function" then
+        return nil, "readfile unavailable"
+    end
+    local ok, result = pcall(readfile, path)
+    if not ok then
+        return nil, tostring(result)
+    end
+    return result
+end
+
+local function WriteFileSafe(path, content)
+    if typeof(writefile) ~= "function" then
+        return false, "writefile unavailable"
+    end
+    local ok, result = pcall(writefile, path, content)
+    if not ok then
+        return false, tostring(result)
+    end
+    return true
+end
+
+local function SaveConfig(configName)
+    local folderOk, folderErr = EnsureConfigFolder()
+    if not folderOk then
+        return false, folderErr
+    end
+
+    local normalized = NormalizeConfigName(configName)
+    local encodeOk, payload = pcall(function()
+        return HttpService:JSONEncode(Config)
+    end)
+    if not encodeOk then
+        return false, tostring(payload)
+    end
+
+    local writeOk, writeErr = WriteFileSafe(BuildConfigPath(normalized), payload)
+    if not writeOk then
+        return false, writeErr
+    end
+
+    ActiveConfigName = normalized
+    WriteFileSafe(GetLastConfigPath(), normalized)
+    return true, normalized
+end
+
+local function LoadConfig(configName)
+    local normalized = NormalizeConfigName(configName)
+    local raw, readErr = ReadFileSafe(BuildConfigPath(normalized))
+    if not raw then
+        return false, readErr
+    end
+
+    local decodeOk, decoded = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not decodeOk or typeof(decoded) ~= "table" then
+        return false, "invalid json config"
+    end
+
+    Config = ClampConfigValues(MergeWithDefaults(DefaultConfig, decoded))
+    ActiveConfigName = normalized
+    ApplyConfigToControls()
+    WriteFileSafe(GetLastConfigPath(), normalized)
+    return true, normalized
+end
+
+local function DeleteConfig(configName)
+    if typeof(delfile) ~= "function" then
+        return false, "delfile unavailable"
+    end
+
+    local normalized = NormalizeConfigName(configName)
+    local path = BuildConfigPath(normalized)
+    if typeof(isfile) == "function" then
+        local existsOk, exists = pcall(isfile, path)
+        if existsOk and not exists then
+            return false, "config not found"
+        end
+    end
+
+    local deleteOk, deleteErr = pcall(delfile, path)
+    if not deleteOk then
+        return false, tostring(deleteErr)
+    end
+    return true, normalized
+end
+
+local function GetConfigNames()
+    local folderOk, folderErr = EnsureConfigFolder()
+    if not folderOk then
+        return {}, folderErr
+    end
+    if not SupportsFolderApi() then
+        return {}, "listing requires folder API support"
+    end
+    if typeof(listfiles) ~= "function" then
+        return {}, "listfiles unavailable"
+    end
+
+    local listOk, files = pcall(listfiles, CONFIG_FOLDER)
+    if not listOk then
+        return {}, tostring(files)
+    end
+
+    local names = {}
+    for _, filePath in ipairs(files) do
+        local name = tostring(filePath):match("([^/\\]+)%.json$")
+        if name then
+            table.insert(names, name)
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+local function LoadLastConfig()
+    local name, readErr = ReadFileSafe(GetLastConfigPath())
+    if not name then
+        return false, readErr
+    end
+    name = tostring(name):gsub("%s+", "")
+    if name == "" then
+        return false, "last config file empty"
+    end
+    return LoadConfig(name)
+end
+
+local function ResetConfigToDefaults()
+    Config = ClampConfigValues(DeepCopy(DefaultConfig))
+    ActiveConfigName = "default"
+    ApplyConfigToControls()
+end
+
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    Camera = Workspace.CurrentCamera
+end)
+
+-- [[ 3. SILENT AIM FUNCTIONS (CAMERA HOOK) ]] --
+
+-- WallCheck
 local function IsVisible(part)
     if not Config.SilentAim.WallCheck then return true end
     local origin = Camera.CFrame.Position
@@ -77,6 +433,7 @@ local function IsVisible(part)
     return result and result.Instance:IsDescendantOf(part.Parent) or true
 end
 
+-- Highlight (Red Chams)
 local function UpdateHighlight(targetChar)
     if CurrentHighlight then CurrentHighlight:Destroy(); CurrentHighlight = nil end
     if Config.SilentAim.Visuals and targetChar then
@@ -87,6 +444,7 @@ local function UpdateHighlight(targetChar)
     end
 end
 
+-- Get Target
 local function GetClosestTarget()
     local MousePos = UserInputService:GetMouseLocation()
     local ClosestDist = Config.SilentAim.FOV
@@ -112,9 +470,9 @@ local function GetClosestTarget()
     return Target
 end
 
+-- THE CAMERA HOOK
 local OldNamecall
 OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-    local Args = {...}
     if getnamecallmethod() == "ScreenPointToRay" and self == Camera and Config.SilentAim.Enabled and CurrentTarget then
         local TargetPart = CurrentTarget:FindFirstChild(Config.SilentAim.TargetPart)
         if TargetPart and math.random(1, 100) <= Config.SilentAim.HitChance then
@@ -124,17 +482,22 @@ OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     return OldNamecall(self, ...)
 end))
 
--- > MOVEMENT LOGIC
+-- [[ 4. MOVEMENT FUNCTIONS ]] --
 local function UpdateMovers(state, type)
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    local char = GetCharacter()
+    local hum, root = GetHumanoidAndRoot(char)
     
     if type == "Slide" then
         if state then
+            if not root then
+                return
+            end
             if not Movers.SlideBV then
-                Movers.SlideBV = Instance.new("BodyVelocity", root); Movers.SlideBV.MaxForce = Vector3.new(1e5,0,1e5)
-                Movers.SlideBG = Instance.new("BodyGyro", root); Movers.SlideBG.MaxTorque = Vector3.new(1e5,0,1e5); Movers.SlideBG.P=10000
+                Movers.SlideBV = Instance.new("BodyVelocity", root)
+                Movers.SlideBV.MaxForce = Vector3.new(1e5,0,1e5)
+                Movers.SlideBG = Instance.new("BodyGyro", root)
+                Movers.SlideBG.MaxTorque = Vector3.new(1e5,0,1e5)
+                Movers.SlideBG.P = 10000
             end
         else
             if Movers.SlideBV then Movers.SlideBV:Destroy(); Movers.SlideBV = nil end
@@ -142,23 +505,576 @@ local function UpdateMovers(state, type)
         end
     elseif type == "Fly" then
         if state then
-            if not Movers.FlyBV then
-                Movers.FlyBV = Instance.new("BodyVelocity", root); Movers.FlyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
-                Movers.FlyBG = Instance.new("BodyGyro", root); Movers.FlyBG.MaxTorque = Vector3.new(1e9,1e9,1e9); Movers.FlyBG.P=10000
+            if not root then
+                return
             end
-            char.Humanoid.PlatformStand = true
+            if not Movers.FlyBV then
+                Movers.FlyBV = Instance.new("BodyVelocity", root)
+                Movers.FlyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
+                Movers.FlyBG = Instance.new("BodyGyro", root)
+                Movers.FlyBG.MaxTorque = Vector3.new(1e9,1e9,1e9)
+                Movers.FlyBG.P = 10000
+            end
+            if hum then
+                hum.PlatformStand = true
+            end
         else
             if Movers.FlyBV then Movers.FlyBV:Destroy(); Movers.FlyBV = nil end
             if Movers.FlyBG then Movers.FlyBG:Destroy(); Movers.FlyBG = nil end
-            char.Humanoid.PlatformStand = false
+            if hum then
+                hum.PlatformStand = false
+            end
         end
     end
 end
 
--- > ESP LOGIC
-local function CreateDrawing(t, p) local d = Drawing.new(t); for k,v in pairs(p) do d[k]=v end; return d end
+local function SetSlideEnabled(state)
+    Config.Movement.SlideEnabled = state
+    UpdateMovers(state, "Slide")
+end
+
+local function SetFlyEnabled(state)
+    Config.Movement.FlyEnabled = state
+    UpdateMovers(state, "Fly")
+end
+
+local function EnsureMovementInstances()
+    if Config.Movement.SlideEnabled and (not Movers.SlideBV or not Movers.SlideBG) then
+        UpdateMovers(true, "Slide")
+    end
+    if Config.Movement.FlyEnabled and (not Movers.FlyBV or not Movers.FlyBG) then
+        UpdateMovers(true, "Fly")
+    end
+end
+
+local function SetNoclipEnabled(state)
+    Config.Movement.Noclip = state
+    if state then
+        if NoclipConnection then
+            NoclipConnection:Disconnect()
+        end
+        NoclipConnection = RunService.Stepped:Connect(function()
+            local char = GetCharacter()
+            if not char then
+                return
+            end
+            for _, p in pairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.CanCollide = false
+                end
+            end
+        end)
+    elseif NoclipConnection then
+        NoclipConnection:Disconnect()
+        NoclipConnection = nil
+    end
+end
+
+local function StartSpillAutofarm()
+    AutofarmTicket += 1
+    local ticket = AutofarmTicket
+    task.spawn(function()
+        local spillSys = Workspace:FindFirstChild("SpillSystem")
+        while Config.Autofarm.Enabled and AutofarmTicket == ticket do
+            if not spillSys or not spillSys.Parent then
+                spillSys = Workspace:FindFirstChild("SpillSystem")
+                task.wait(1)
+                continue
+            end
+
+            for _, spill in pairs(spillSys:GetChildren()) do
+                if not Config.Autofarm.Enabled or AutofarmTicket ~= ticket then
+                    return
+                end
+
+                local target = (spill:IsA("Model") and spill.PrimaryPart) or (spill:IsA("BasePart") and spill)
+                local decal = spill:FindFirstChildWhichIsA("Decal", true)
+                if target and decal and decal.Transparency < 0.1 then
+                    local _, root = GetHumanoidAndRoot(GetCharacter())
+                    if root then
+                        local dist = (root.Position - target.Position).Magnitude
+                        local time = dist / math.max(Config.Autofarm.Speed, 1)
+                        local tween = TweenService:Create(root, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = CFrame.new(target.Position + Vector3.new(0,3,0))})
+                        tween:Play()
+
+                        local elapsed = 0
+                        while elapsed < time do
+                            if not Config.Autofarm.Enabled or AutofarmTicket ~= ticket then
+                                tween:Cancel()
+                                return
+                            end
+                            task.wait(0.1)
+                            elapsed += 0.1
+                        end
+
+                        if Config.Autofarm.Enabled and AutofarmTicket == ticket then
+                            local prompt = spill:FindFirstChildWhichIsA("ProximityPrompt", true)
+                            if prompt then
+                                fireproximityprompt(prompt)
+                            end
+                        end
+                        task.wait(2)
+                    end
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+local function SetAutofarmEnabled(state)
+    Config.Autofarm.Enabled = state
+    if state then
+        StartSpillAutofarm()
+    else
+        AutofarmTicket += 1
+    end
+end
+
+local function TriggerPrompt(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Enabled then
+        return false
+    end
+
+    local oldHold = prompt.HoldDuration
+    local oldLineOfSight = prompt.RequiresLineOfSight
+    local fired = false
+    pcall(function()
+        prompt.HoldDuration = 0
+        prompt.RequiresLineOfSight = false
+    end)
+    local ok = pcall(function()
+        fireproximityprompt(prompt, 1, true)
+    end)
+    if ok then
+        fired = true
+    end
+    if not fired then
+        ok = pcall(function()
+            fireproximityprompt(prompt, 0, true)
+        end)
+        if ok then
+            fired = true
+        end
+    end
+    if not fired then
+        ok = pcall(function()
+            fireproximityprompt(prompt)
+        end)
+        if ok then
+            fired = true
+        end
+    end
+    pcall(function()
+        prompt.HoldDuration = oldHold
+        prompt.RequiresLineOfSight = oldLineOfSight
+    end)
+    return fired
+end
+
+local function GetInstanceBasePart(obj)
+    if not obj then
+        return nil
+    end
+    if obj:IsA("BasePart") then
+        return obj
+    end
+    if obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return obj:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function GetPromptActivationPosition(prompt)
+    if not prompt then
+        return nil
+    end
+
+    local parent = prompt.Parent
+    if parent and parent:IsA("BasePart") then
+        return parent.Position
+    end
+
+    local ancestorPart = prompt:FindFirstAncestorWhichIsA("BasePart")
+    if ancestorPart then
+        return ancestorPart.Position
+    end
+
+    if parent and parent:IsA("Model") then
+        local part = parent.PrimaryPart or parent:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            return part.Position
+        end
+    end
+
+    return nil
+end
+
+local function SnapRootToPosition(position, lookAtPosition)
+    local hum, root = GetHumanoidAndRoot(GetCharacter())
+    if not hum or hum.Health <= 0 or not root then
+        return
+    end
+
+    local standPos = position + Vector3.new(0, 2.5, 0)
+    root.CFrame = CFrame.lookAt(standPos, lookAtPosition or position)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+end
+
+local function TriggerPromptAtPosition(prompt, position)
+    if not prompt or not prompt:IsA("ProximityPrompt") or not prompt.Enabled then
+        return false
+    end
+
+    if position then
+        SnapRootToPosition(position, position)
+    end
+    return TriggerPrompt(prompt)
+end
+
+local function TriggerPromptsInContainerNear(container, centerPosition, radius, excludedRoot)
+    if not container then
+        return 0
+    end
+
+    local triggered = 0
+    for _, desc in ipairs(container:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled and (not excludedRoot or not desc:IsDescendantOf(excludedRoot)) then
+            local pos = GetPromptActivationPosition(desc)
+            if pos and (pos - centerPosition).Magnitude <= radius then
+                if TriggerPromptAtPosition(desc, pos) then
+                    triggered += 1
+                end
+            end
+        end
+    end
+    return triggered
+end
+
+local function BindLootClientSessionState()
+    local lootRemote = ReplicatedStorage:FindFirstChild("LootClient")
+    if not lootRemote then
+        local ok, waited = pcall(function()
+            return ReplicatedStorage:WaitForChild("LootClient", 10)
+        end)
+        if ok then
+            lootRemote = waited
+        end
+    end
+
+    if lootRemote and lootRemote:IsA("RemoteEvent") then
+        lootRemote.OnClientEvent:Connect(function(state)
+            LootClientSessionActive = state == true
+        end)
+    end
+end
+
+local function IsLootSessionActive()
+    if LootClientSessionActive then
+        return true
+    end
+    local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    return playerGui and playerGui:FindFirstChild("LootUI") ~= nil
+end
+
+BindLootClientSessionState()
+
+local function GetAirdropData()
+    local eventDebris = Workspace:FindFirstChild("EventDebris")
+    if not eventDebris then
+        return nil, nil, nil
+    end
+
+    local airdrop = eventDebris:FindFirstChild("Airdrop")
+    if not airdrop then
+        return nil, nil, nil
+    end
+
+    local part = GetInstanceBasePart(airdrop)
+    local prompt = airdrop:FindFirstChildWhichIsA("ProximityPrompt", true)
+    return airdrop, part, prompt
+end
+
+local function DisconnectAirdropLock()
+    if AirdropLockConnection then
+        AirdropLockConnection:Disconnect()
+        AirdropLockConnection = nil
+    end
+    LockedAirdropPart = nil
+end
+
+local function SetAirdropLockPart(part)
+    if LockedAirdropPart == part and AirdropLockConnection then
+        return
+    end
+
+    DisconnectAirdropLock()
+    LockedAirdropPart = part
+    if not part then
+        return
+    end
+
+    AirdropLockConnection = RunService.RenderStepped:Connect(function()
+        if not Config.Autofarm.AirdropEnabled then
+            DisconnectAirdropLock()
+            return
+        end
+        if not LockedAirdropPart or not LockedAirdropPart.Parent then
+            DisconnectAirdropLock()
+            return
+        end
+        if AirdropKillActiveCount > 0 then
+            return
+        end
+
+        local hum, root = GetHumanoidAndRoot(GetCharacter())
+        if not hum or not root or hum.Health <= 0 then
+            return
+        end
+
+        local holdPosition = LockedAirdropPart.Position + Vector3.new(0, 3, 0)
+        root.CFrame = CFrame.lookAt(holdPosition, LockedAirdropPart.Position)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+local function EquipBestGun()
+    local char = GetCharacter()
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not char or not hum then
+        return nil
+    end
+
+    local equipped = char:FindFirstChildWhichIsA("Tool")
+    if equipped and equipped:FindFirstChild("Stats") then
+        return equipped
+    end
+
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool:FindFirstChild("Stats") then
+                pcall(function()
+                    hum:EquipTool(tool)
+                end)
+                task.wait()
+                local afterEquip = char:FindFirstChildWhichIsA("Tool")
+                if afterEquip and afterEquip:FindFirstChild("Stats") then
+                    return afterEquip
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function InstaKillMagDumpTarget(targetPlayer)
+    local gunRemotes = ReplicatedStorage:FindFirstChild("GunRemotes")
+    local fireRemote = gunRemotes and gunRemotes:FindFirstChild("Fire")
+    local impactRemote = gunRemotes and gunRemotes:FindFirstChild("Impact")
+    if not fireRemote or not impactRemote then
+        return
+    end
+
+    local weapon = EquipBestGun()
+    if not weapon then
+        return
+    end
+
+    local targetChar = targetPlayer.Character
+    local targetHum, targetRoot = GetHumanoidAndRoot(targetChar)
+    local targetHead = targetChar and targetChar:FindFirstChild("Head")
+    if not targetHum or targetHum.Health <= 0 or not targetHead or not targetRoot then
+        return
+    end
+
+    local _, myRoot = GetHumanoidAndRoot(GetCharacter())
+    if not myRoot then
+        return
+    end
+
+    local attachOffset = CFrame.new(0, 0, 3)
+    for _ = 1, 10 do
+        if not Config.Autofarm.AirdropEnabled then
+            return
+        end
+
+        _, myRoot = GetHumanoidAndRoot(GetCharacter())
+        if not myRoot then
+            return
+        end
+
+        targetChar = targetPlayer.Character
+        targetHum, targetRoot = GetHumanoidAndRoot(targetChar)
+        targetHead = targetChar and targetChar:FindFirstChild("Head")
+        if not targetHum or targetHum.Health <= 0 or not targetHead or not targetRoot then
+            return
+        end
+
+        local lockPos = targetRoot.CFrame * attachOffset
+        myRoot.CFrame = CFrame.lookAt(lockPos.Position, targetRoot.Position)
+        myRoot.AssemblyLinearVelocity = Vector3.zero
+        myRoot.AssemblyAngularVelocity = Vector3.zero
+
+        local dir = targetHead.Position - myRoot.Position
+        if dir.Magnitude <= 0 then
+            dir = Vector3.new(0, 1, 0)
+        end
+
+        pcall(function()
+            fireRemote:FireServer()
+        end)
+        pcall(function()
+            impactRemote:FireServer(targetHead, targetHead.Position, dir.Unit, Vector3.new(0, 1, 0), false, nil, nil)
+        end)
+        task.wait(0.05)
+    end
+end
+
+local function QueueAirdropKill(targetPlayer)
+    if AirdropKillTasks[targetPlayer] then
+        return
+    end
+
+    AirdropKillTasks[targetPlayer] = true
+    task.spawn(function()
+        AirdropKillActiveCount += 1
+        pcall(function()
+            InstaKillMagDumpTarget(targetPlayer)
+        end)
+        AirdropKillActiveCount = math.max(0, AirdropKillActiveCount - 1)
+        task.wait(0.05)
+        AirdropKillTasks[targetPlayer] = nil
+    end)
+end
+
+local function HandleAirdropAutofarmStep()
+    local airdropObj, airdropPart, lootPrompt = GetAirdropData()
+    if not airdropPart then
+        DisconnectAirdropLock()
+        return
+    end
+
+    SetAirdropLockPart(airdropPart)
+    local airdropPosition = airdropPart.Position
+    local now = tick()
+    local lootSessionActive = IsLootSessionActive()
+
+    if not lootSessionActive and now - LastAirdropPromptTick >= 0.85 then
+        LastAirdropPromptTick = now
+        local opened = false
+
+        if lootPrompt and lootPrompt.Enabled then
+            opened = TriggerPromptAtPosition(lootPrompt, airdropPosition)
+        end
+
+        if not opened then
+            TriggerPromptsInContainerNear(airdropObj, airdropPosition, 25)
+        end
+    end
+
+    if now - LastAirdropLootSweepTick >= (lootSessionActive and 0.18 or 0.30) then
+        LastAirdropLootSweepTick = now
+        local lootRadius = math.max(Config.Misc.LootRange, 35)
+        TriggerPromptsInContainerNear(Workspace:FindFirstChild("EventDebris"), airdropPosition, lootRadius, airdropObj)
+        TriggerPromptsInContainerNear(Workspace:FindFirstChild("Lootables"), airdropPosition, lootRadius)
+        TriggerPromptsInContainerNear(Workspace:FindFirstChild("OBJECTS"), airdropPosition, lootRadius)
+    end
+
+    local radius = Config.Autofarm.AirdropKillRadius
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local hum, root = GetHumanoidAndRoot(player.Character)
+            if hum and hum.Health > 0 and root and (root.Position - airdropPosition).Magnitude <= radius then
+                QueueAirdropKill(player)
+            end
+        end
+    end
+end
+
+local function StartAirdropAutofarm()
+    AirdropAutofarmTicket += 1
+    local ticket = AirdropAutofarmTicket
+    task.spawn(function()
+        while Config.Autofarm.AirdropEnabled and AirdropAutofarmTicket == ticket do
+            HandleAirdropAutofarmStep()
+            task.wait(0.05)
+        end
+        DisconnectAirdropLock()
+    end)
+end
+
+local function SetAirdropAutofarmEnabled(state)
+    Config.Autofarm.AirdropEnabled = state
+    if state then
+        LootClientSessionActive = false
+        LastAirdropPromptTick = 0
+        LastAirdropLootSweepTick = 0
+        StartAirdropAutofarm()
+    else
+        LootClientSessionActive = false
+        AirdropAutofarmTicket += 1
+        DisconnectAirdropLock()
+    end
+end
+
+local function HandleLootMagnet()
+    local _, root = GetHumanoidAndRoot(GetCharacter())
+    if not root then
+        return
+    end
+
+    local range = Config.Misc.LootRange
+    local function Scan(container)
+        if not container then
+            return
+        end
+
+        for _, item in ipairs(container:GetChildren()) do
+            local part = item:IsA("BasePart") and item or (item:IsA("Model") and (item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)) or nil)
+            if part and (part.Position - root.Position).Magnitude <= range then
+                local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if prompt then
+                    TriggerPrompt(prompt)
+                end
+            end
+        end
+    end
+
+    Scan(Workspace:FindFirstChild("Lootables"))
+    Scan(Workspace:FindFirstChild("OBJECTS"))
+end
+
+-- [[ 5. ESP LOGIC ]] --
+local function CreateDrawing(t, p) local d = Drawing.new(t);
+for k,v in pairs(p) do d[k]=v end; return d end
+
+local function RemoveESP(plr)
+    if ESP_Storage[plr] then
+        for _, d in pairs(ESP_Storage[plr]) do if d.Remove then d:Remove() end end
+        ESP_Storage[plr] = nil
+    end
+    if plr.Character and CurrentTarget == plr.Character then
+        CurrentTarget = nil
+        CurrentTargetPart = nil
+        UpdateHighlight(nil)
+    end
+end
+
 local function HandleESP()
-    if not Config.Visuals.Enabled then for _,p in pairs(ESP_Storage) do for _,d in pairs(p) do d.Visible=false end end return end
+    local cam = GetCamera()
+    if not cam then
+        return
+    end
+
+    if not Config.Visuals.Enabled then 
+        for _, p in pairs(ESP_Storage) do for _, d in pairs(p) do d.Visible = false end end
+        return 
+    end
+
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
             if not ESP_Storage[plr] then
@@ -166,312 +1082,1925 @@ local function HandleESP()
                     Box = CreateDrawing("Square", {Thickness=1, Color=Color3.new(1,1,1), Filled=false}),
                     Name = CreateDrawing("Text", {Size=13, Center=true, Outline=true, Color=Color3.new(1,1,1)}),
                     Bar = CreateDrawing("Square", {Filled=true}),
-                    Tool = CreateDrawing("Text", {Size=12, Center=true, Outline=true, Color=Color3.new(0.8,0.8,1)})
+                    Tool = CreateDrawing("Text", {Size=12, Center=true, Outline=true, Color=Color3.new(0.8,0.8,1)}),
+                    Tracer = CreateDrawing("Line", {Thickness=1, Color=Color3.new(1,1,1), Transparency=1})
                 }
             end
+
             local d = ESP_Storage[plr]
-            local char, root, hum = plr.Character, plr.Character and plr.Character:FindFirstChild("HumanoidRootPart"), plr.Character and plr.Character:FindFirstChild("Humanoid")
+            local char = plr.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChild("Humanoid")
             local show = false
+
             if root and hum and hum.Health > 0 then
-                local pos, vis = Camera:WorldToViewportPoint(root.Position)
-                if vis and (root.Position - Camera.CFrame.Position).Magnitude <= Config.Visuals.MaxDist then
+                local pos, vis = cam:WorldToViewportPoint(root.Position)
+                if vis and (root.Position - cam.CFrame.Position).Magnitude <= Config.Visuals.MaxDist then
                     show = true
-                    local h = 1000/pos.Z * 3.5; local w = h/2; local x = pos.X - w/2; local y = pos.Y - h/2
-                    if Config.Visuals.Box then d.Box.Visible=true; d.Box.Size=Vector2.new(w,h); d.Box.Position=Vector2.new(x,y) else d.Box.Visible=false end
-                    if Config.Visuals.Name then d.Name.Visible=true; d.Name.Text=plr.Name; d.Name.Position=Vector2.new(x+w/2, y-16) else d.Name.Visible=false end
+                    local h = 1000/pos.Z * 3.5;
+                    local w = h/2; local x = pos.X - w/2;
+                    local y = pos.Y - h/2
+                    
+                    if Config.Visuals.Box then d.Box.Visible=true;
+                    d.Box.Size=Vector2.new(w,h); d.Box.Position=Vector2.new(x,y) else d.Box.Visible=false end
+                    if Config.Visuals.Name then d.Name.Visible=true;
+                    d.Name.Text=plr.Name; d.Name.Position=Vector2.new(x+w/2, y-16) else d.Name.Visible=false end
                     if Config.Visuals.Health then
                         local hp = math.clamp(hum.Health/hum.MaxHealth, 0, 1)
-                        d.Bar.Visible=true; d.Bar.Size=Vector2.new(2, h*hp); d.Bar.Position=Vector2.new(x-5, y+h-(h*hp)); d.Bar.Color=Color3.fromHSV(hp*0.3,1,1)
+                        d.Bar.Visible=true;
+                        d.Bar.Size=Vector2.new(2, h*hp); d.Bar.Position=Vector2.new(x-5, y+h-(h*hp)); d.Bar.Color=Color3.fromHSV(hp*0.3,1,1)
                     else d.Bar.Visible=false end
+                    
                     if Config.Visuals.Tool then
-                        local t = char:FindFirstChildWhichIsA("Tool")
-                        d.Tool.Visible = t ~= nil; d.Tool.Text = t and t.Name or ""; d.Tool.Position = Vector2.new(x + w/2, y + h + 2)
+                        local tool = char:FindFirstChildWhichIsA("Tool")
+                        if tool then d.Tool.Visible = true;
+                        d.Tool.Text = tool.Name; d.Tool.Position = Vector2.new(x + w/2, y + h + 2) else d.Tool.Visible = false end
                     else d.Tool.Visible = false end
+
+                    if Config.Visuals.Tracer then
+                        d.Tracer.Visible = true
+                        d.Tracer.From = Vector2.new(cam.ViewportSize.X * 0.5, cam.ViewportSize.Y)
+                        d.Tracer.To = Vector2.new(pos.X, pos.Y)
+                    else
+                        d.Tracer.Visible = false
+                    end
                 end
             end
             if not show then for _, o in pairs(d) do o.Visible = false end end
         end
     end
 end
-Players.PlayerRemoving:Connect(function(p) if ESP_Storage[p] then for _,d in pairs(ESP_Storage[p]) do d:Remove() end ESP_Storage[p]=nil end end)
 
--- > FARMING LOGIC
-local function IsSpillDirty(m) local d = m:FindFirstChildWhichIsA("Decal", true); return d and d.Transparency < 0.1 end
-local function CleanSpill(m) local p = m:FindFirstChildWhichIsA("ProximityPrompt", true); if p then fireproximityprompt(p) return true end return false end
-local function TweenTo(pos)
-    local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not r then return false end
-    local time = (r.Position - pos).Magnitude / Config.Autofarm.Speed
-    local t = TweenService:Create(r, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = CFrame.new(pos + Config.Autofarm.Offset)})
-    t:Play()
-    local passed = 0
-    while passed < time do if not Config.Autofarm.Enabled then t:Cancel() return false end task.wait(0.1) passed=passed+0.1 end
-    return true
+Players.PlayerRemoving:Connect(function(plr)
+    RemoveESP(plr)
+    AirdropKillTasks[plr] = nil
+    local uid = tonumber(plr.UserId) or 0
+    local modKey = uid > 0 and tostring(uid) or string.lower(plr.Name)
+    ModDetectionFlaggedUsers[modKey] = nil
+    ModDetectionRoleCache[modKey] = nil
+end)
+
+-- [[ 6. UI SETUP (MOBILE) ]] --
+local function Notify(title, message, duration)
+    print(string.format("[Focus] %s: %s", tostring(title), tostring(message)))
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = tostring(title),
+            Text = tostring(message),
+            Duration = duration or 3
+        })
+    end)
 end
-
--- > ANTI-AFK LOGIC
-local Environment = {
+local AntiAfkEnvironment = {
     IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
-    HasVirtualUser = pcall(function() return VirtualUser:CaptureController() end),
-    HasVIM = type(VirtualInputManager) == "userdata"
+    HasVirtualUser = false,
+    HasVIM = VirtualInputManager ~= nil
 }
+local LastAntiAfkNudge = tick()
+
+if VirtualUser then
+    pcall(function()
+        VirtualUser:CaptureController()
+        AntiAfkEnvironment.HasVirtualUser = true
+    end)
+end
 
 local function MobileCameraNudge()
-    if not Camera then return end
-    local originalCFrame = Camera.CFrame
+    local cam = GetCamera()
+    if not cam then
+        return
+    end
+
+    local originalCFrame = cam.CFrame
     local targetCFrame = originalCFrame * CFrame.Angles(0, math.rad(math.random(-2, 2)), 0)
-    local tweenIn = TweenService:Create(Camera, TweenInfo.new(0.5, Enum.EasingStyle.Sine), {CFrame = targetCFrame})
-    local tweenOut = TweenService:Create(Camera, TweenInfo.new(0.5, Enum.EasingStyle.Sine), {CFrame = originalCFrame})
-    tweenIn:Play(); tweenIn.Completed:Wait()
-    task.wait(0.1); tweenOut:Play()
+
+    local tweenIn = TweenService:Create(cam, TweenInfo.new(0.35, Enum.EasingStyle.Sine), { CFrame = targetCFrame })
+    local tweenOut = TweenService:Create(cam, TweenInfo.new(0.35, Enum.EasingStyle.Sine), { CFrame = originalCFrame })
+    tweenIn:Play()
+    tweenIn.Completed:Wait()
+    task.wait(0.05)
+    tweenOut:Play()
 end
 
-LocalPlayer.Idled:Connect(function()
-    if not Config.Misc.AntiAFK then return end
-    
-    print("[FocusMobile] Idled event triggered. Anti-AFK is simulating movement to prevent kick.")
-    
-    -- Execute multiple input methods to guarantee AFK timer reset safely
-    if Environment.HasVirtualUser then
+local function TriggerAntiAfkInput()
+    local cam = GetCamera()
+    if AntiAfkEnvironment.HasVirtualUser and cam then
         pcall(function()
             VirtualUser:CaptureController()
-            VirtualUser:ClickButton2(Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2), Camera.CFrame)
+            local viewport = cam.ViewportSize
+            VirtualUser:ClickButton2(Vector2.new(viewport.X * 0.5, viewport.Y * 0.5), cam.CFrame)
         end)
-    elseif Environment.HasVIM then
+    elseif AntiAfkEnvironment.HasVIM then
         pcall(function()
             VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightShift, false, game)
             task.wait(0.05)
             VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightShift, false, game)
         end)
     end
-    
-    if Environment.IsMobile then task.spawn(MobileCameraNudge) end
-    
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum and hum:GetState() ~= Enum.HumanoidStateType.Dead and math.random(1, 3) == 1 then
-        hum.Jump = true
-    end
-end)
 
-local lastNudge = os.clock()
-RunService.Heartbeat:Connect(function()
-    if Config.Misc.AntiAFK and os.clock() - lastNudge >= 180 then
-        lastNudge = os.clock()
+    if AntiAfkEnvironment.IsMobile then
         task.spawn(MobileCameraNudge)
     end
+
+    local humanoid = GetHumanoidAndRoot(GetCharacter())
+    if humanoid and humanoid:GetState() ~= Enum.HumanoidStateType.Dead and math.random(1, 3) == 1 then
+        humanoid.Jump = true
+    end
+end
+
+local function SetAntiAfkEnabled(state)
+    local wasEnabled = Config.Misc.AntiAFK == true
+    Config.Misc.AntiAFK = state == true
+    if Config.Misc.AntiAFK then
+        LastAntiAfkNudge = tick()
+        if not wasEnabled then
+            print("antiAFKON")
+        end
+    end
+end
+
+local function TryRejoin()
+    Notify("Rejoin", "Teleporting to a fresh session...")
+    local ok, err = pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+    if not ok then
+        Notify("Rejoin Failed", tostring(err))
+    end
+end
+
+local function TryServerHop()
+    Notify("Server Hop", "Searching for available servers...")
+    task.spawn(function()
+        local placeId = game.PlaceId
+        local currentJobId = game.JobId
+        local candidates = {}
+        local cursor = nil
+
+        for _ = 1, 8 do
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100%s",
+                placeId,
+                cursor and ("&cursor=" .. cursor) or ""
+            )
+
+            local fetchOk, body = pcall(function()
+                return game:HttpGet(url)
+            end)
+            if not fetchOk then
+                break
+            end
+
+            local parseOk, payload = pcall(function()
+                return HttpService:JSONDecode(body)
+            end)
+            if not parseOk or typeof(payload) ~= "table" then
+                break
+            end
+
+            local list = payload.data
+            if typeof(list) == "table" then
+                for _, server in ipairs(list) do
+                    local id = server.id
+                    local playing = tonumber(server.playing or server.playerCount) or 0
+                    local maxPlayers = tonumber(server.maxPlayers) or 0
+                    if id and id ~= currentJobId and maxPlayers > 0 and playing < maxPlayers then
+                        table.insert(candidates, id)
+                    end
+                end
+            end
+
+            cursor = payload.nextPageCursor
+            if not cursor then
+                break
+            end
+            task.wait(0.05)
+        end
+
+        if #candidates == 0 then
+            Notify("Server Hop", "No open server found right now")
+            return
+        end
+
+        local targetServerId = candidates[math.random(1, #candidates)]
+        Notify("Server Hop", "Teleporting...")
+        local tpOk, tpErr = pcall(function()
+            TeleportService:TeleportToPlaceInstance(placeId, targetServerId, LocalPlayer)
+        end)
+        if not tpOk then
+            Notify("Server Hop Failed", tostring(tpErr))
+        end
+    end)
+end
+
+local function HasAirdropInCurrentServer()
+    local eventDebris = Workspace:FindFirstChild("EventDebris")
+    return eventDebris and eventDebris:FindFirstChild("Airdrop") ~= nil
+end
+
+local function IsLocalPlayerReadyForAirdropHop()
+    if not game:IsLoaded() then
+        return false
+    end
+
+    local hum, root = GetHumanoidAndRoot(GetCharacter())
+    return hum ~= nil and hum.Health > 0 and root ~= nil
+end
+
+local function WaitForLocalPlayerReadyForAirdropHop(timeout)
+    local deadline = tick() + (timeout or 30)
+    while tick() < deadline do
+        if IsLocalPlayerReadyForAirdropHop() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return IsLocalPlayerReadyForAirdropHop()
+end
+
+local function WaitForAirdropSyncInCurrentServer(timeout)
+    local deadline = tick() + (timeout or 5)
+    while tick() < deadline do
+        if HasAirdropInCurrentServer() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return HasAirdropInCurrentServer()
+end
+
+local function GetQueueOnTeleportFunction()
+    if typeof(queue_on_teleport) == "function" then
+        return queue_on_teleport
+    end
+
+    local okSyn, synObj = pcall(function()
+        return syn
+    end)
+    if okSyn and type(synObj) == "table" and typeof(synObj.queue_on_teleport) == "function" then
+        return synObj.queue_on_teleport
+    end
+
+    local okFlux, fluxObj = pcall(function()
+        return fluxus
+    end)
+    if okFlux and type(fluxObj) == "table" and typeof(fluxObj.queue_on_teleport) == "function" then
+        return fluxObj.queue_on_teleport
+    end
+
+    return nil
+end
+
+local function BuildAirdropServerHopQueueScript()
+    local template = [====[
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+local SOURCE = %q
+local SEEN_JSON = %q
+
+local function hasAirdrop()
+    local eventDebris = Workspace:FindFirstChild("EventDebris")
+    return eventDebris and eventDebris:FindFirstChild("Airdrop") ~= nil
+end
+
+local function isLocalPlayerReady()
+    if not game:IsLoaded() or not LocalPlayer then
+        return false
+    end
+
+    local character = LocalPlayer.Character
+    if not character then
+        return false
+    end
+
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    return hum ~= nil and hum.Health > 0 and root ~= nil
+end
+
+local function waitForFullLoad(timeout)
+    local deadline = tick() + (timeout or 30)
+    while tick() < deadline do
+        if isLocalPlayerReady() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return isLocalPlayerReady()
+end
+
+local function waitForAirdropSync(timeout)
+    local deadline = tick() + (timeout or 5)
+    while tick() < deadline do
+        if hasAirdrop() then
+            return true
+        end
+        task.wait(0.2)
+    end
+    return hasAirdrop()
+end
+
+waitForFullLoad(30)
+
+if waitForAirdropSync(5) then
+    print("[Focus] Airdrop found. Stopping airdrop hop.")
+    return
+end
+
+local function getQueueOnTeleport()
+    if typeof(queue_on_teleport) == "function" then
+        return queue_on_teleport
+    end
+
+    local okSyn, synObj = pcall(function()
+        return syn
+    end)
+    if okSyn and type(synObj) == "table" and typeof(synObj.queue_on_teleport) == "function" then
+        return synObj.queue_on_teleport
+    end
+
+    local okFlux, fluxObj = pcall(function()
+        return fluxus
+    end)
+    if okFlux and type(fluxObj) == "table" and typeof(fluxObj.queue_on_teleport) == "function" then
+        return fluxObj.queue_on_teleport
+    end
+
+    return nil
+end
+
+local function decodeSeen(json)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(json or "{}")
+    end)
+    if ok and typeof(data) == "table" then
+        return data
+    end
+    return {}
+end
+
+local function encodeSeen(seen)
+    local ok, data = pcall(function()
+        return HttpService:JSONEncode(seen)
+    end)
+    if ok and type(data) == "string" then
+        return data
+    end
+    return "{}"
+end
+
+local seenServers = decodeSeen(SEEN_JSON)
+seenServers[tostring(game.JobId)] = true
+
+local function queueSelf(seenJson)
+    local queueFn = getQueueOnTeleport()
+    if not queueFn then
+        return
+    end
+
+    pcall(function()
+        queueFn(string.format(SOURCE, SOURCE, seenJson or "{}"))
+    end)
+end
+
+local function collectCandidateServers()
+    local placeId = game.PlaceId
+    local currentJobId = game.JobId
+    local candidates = {}
+    local cursor = nil
+
+    for _ = 1, 8 do
+        local url = "https://games.roblox.com/v1/games/" .. tostring(placeId) .. "/servers/Public?sortOrder=Asc&limit=100"
+        if cursor then
+            url = url .. "&cursor=" .. cursor
+        end
+
+        local fetchOk, body = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if not fetchOk then
+            break
+        end
+
+        local parseOk, payload = pcall(function()
+            return HttpService:JSONDecode(body)
+        end)
+        if not parseOk or typeof(payload) ~= "table" then
+            break
+        end
+
+        local list = payload.data
+        if typeof(list) == "table" then
+            for _, server in ipairs(list) do
+                local id = server.id
+                local idStr = id and tostring(id) or nil
+                local playing = tonumber(server.playing or server.playerCount) or 0
+                local maxPlayers = tonumber(server.maxPlayers) or 0
+                if id and id ~= currentJobId and not seenServers[idStr] and maxPlayers > 0 and playing < maxPlayers then
+                    table.insert(candidates, id)
+                end
+            end
+        end
+
+        cursor = payload.nextPageCursor
+        if not cursor then
+            break
+        end
+        task.wait(0.05)
+    end
+
+    return candidates
+end
+
+local options = collectCandidateServers()
+if #options == 0 then
+    seenServers = {[tostring(game.JobId)] = true}
+    options = collectCandidateServers()
+end
+
+if #options == 0 then
+    queueSelf(encodeSeen(seenServers))
+    pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+else
+    local serverId = options[math.random(1, #options)]
+    seenServers[tostring(serverId)] = true
+    queueSelf(encodeSeen(seenServers))
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+    end)
+end
+]====]
+    local initialSeen = "{}"
+    local seenOk, seenValue = pcall(function()
+        return HttpService:JSONEncode({[tostring(game.JobId)] = true})
+    end)
+    if seenOk and type(seenValue) == "string" then
+        initialSeen = seenValue
+    end
+    return string.format(template, template, initialSeen)
+end
+
+local function TryAirdropServerHop()
+    WaitForLocalPlayerReadyForAirdropHop(30)
+
+    if WaitForAirdropSyncInCurrentServer(5) then
+        Notify("Airdrop Hop", "Airdrop already exists in this server")
+        return
+    end
+
+    local queueFn = GetQueueOnTeleportFunction()
+    if queueFn then
+        local queueScript = BuildAirdropServerHopQueueScript()
+        local queuedOk = pcall(function()
+            queueFn(queueScript)
+        end)
+        if queuedOk then
+            Notify("Airdrop Hop", "Queue armed. Hopping until airdrop is found")
+        else
+            Notify("Airdrop Hop", "Queue failed. Doing single hop only")
+        end
+    else
+        Notify("Airdrop Hop", "No queue support. Doing single hop only")
+    end
+
+    TryServerHop()
+end
+
+local function SetAirdropServerHopEnabled(state)
+    Config.Autofarm.AirdropServerHopEnabled = state
+    if not state then
+        AirdropServerHopTicket += 1
+        AirdropServerHopBusy = false
+        return
+    end
+
+    if HasAirdropInCurrentServer() then
+        Notify("Airdrop Hop", "Airdrop already exists in this server")
+        Config.Autofarm.AirdropServerHopEnabled = false
+        ApplyConfigToControls()
+        return
+    end
+
+    AirdropServerHopTicket += 1
+    local ticket = AirdropServerHopTicket
+    task.spawn(function()
+        while Config.Autofarm.AirdropServerHopEnabled and AirdropServerHopTicket == ticket do
+            if HasAirdropInCurrentServer() then
+                Notify("Airdrop Hop", "Airdrop found. Hop stopped")
+                Config.Autofarm.AirdropServerHopEnabled = false
+                ApplyConfigToControls()
+                break
+            end
+
+            if not AirdropServerHopBusy then
+                AirdropServerHopBusy = true
+                local ok, err = pcall(TryAirdropServerHop)
+                if not ok then
+                    Notify("Airdrop Hop Failed", tostring(err))
+                end
+                task.wait(1)
+                AirdropServerHopBusy = false
+            end
+
+            task.wait(8)
+        end
+    end)
+end
+
+local MOD_DETECTION_GROUP_ID = 33733471
+local ModDetectionRoleKeywords = {
+    "owner",
+    "headadmin",
+    "head admin",
+    "admin",
+    "moderator",
+    "mod",
+    "staff",
+    "creator",
+    "communitymanager",
+    "community manager",
+    "manager",
+    "developer"
+}
+local ModDetectionValueKeywords = {
+    "headadmin",
+    "head admin",
+    "admin",
+    "moderator",
+    "modlevel",
+    "mod",
+    "staff",
+    "scriptaccess",
+    "script access",
+    "owner",
+    "creator",
+    "permission",
+    "manager",
+    "rank"
+}
+
+local function TextHasKeyword(text, keywords)
+    local lower = string.lower(tostring(text or ""))
+    if lower == "" then
+        return nil
+    end
+
+    local normalized = " " .. string.gsub(lower, "[^%w]+", " ") .. " "
+
+    for _, keyword in ipairs(keywords) do
+        local hit = false
+        if #keyword <= 3 then
+            hit = lower == keyword or string.find(normalized, " " .. keyword .. " ", 1, true) ~= nil
+        else
+            hit = string.find(lower, keyword, 1, true) ~= nil
+        end
+        if hit then
+            return keyword
+        end
+    end
+    return nil
+end
+
+local function AddReasonUnique(reasons, reason)
+    if not reason or reason == "" then
+        return
+    end
+    for _, existing in ipairs(reasons) do
+        if existing == reason then
+            return
+        end
+    end
+    table.insert(reasons, reason)
+end
+
+local function BuildModDetectionUserKey(plr)
+    local uid = tonumber(plr.UserId) or 0
+    if uid > 0 then
+        return tostring(uid)
+    end
+    return string.lower(plr.Name)
+end
+
+local function LoadModDetectionScriptAccessUsers()
+    if ModDetectionScriptAccessLoaded then
+        return
+    end
+    ModDetectionScriptAccessLoaded = true
+
+    local moduleScript = ReplicatedStorage:FindFirstChild("CreatorsWithToolGiveAccessAndScriptAccess", true)
+    if not moduleScript or not moduleScript:IsA("ModuleScript") then
+        return
+    end
+
+    local ok, entries = pcall(function()
+        return require(moduleScript)
+    end)
+    if not ok or typeof(entries) ~= "table" then
+        return
+    end
+
+    for name, data in pairs(entries) do
+        if typeof(name) == "string" then
+            local hasAccess = false
+            if typeof(data) == "table" then
+                hasAccess = data.ScriptAccess == true
+            elseif data == true then
+                hasAccess = true
+            end
+            if hasAccess then
+                ModDetectionKnownPrivilegedNames[string.lower(name)] = true
+            end
+        end
+    end
+end
+
+local function GetCachedGroupRoleInfo(plr)
+    local key = BuildModDetectionUserKey(plr)
+    local cached = ModDetectionRoleCache[key]
+    if cached then
+        return cached
+    end
+
+    local info = { Role = "", Rank = 0 }
+    local okRole, role = pcall(function()
+        return plr:GetRoleInGroup(MOD_DETECTION_GROUP_ID)
+    end)
+    if okRole and type(role) == "string" then
+        info.Role = role
+    end
+
+    local okRank, rank = pcall(function()
+        return plr:GetRankInGroup(MOD_DETECTION_GROUP_ID)
+    end)
+    if okRank and type(rank) == "number" then
+        info.Rank = rank
+    end
+
+    ModDetectionRoleCache[key] = info
+    return info
+end
+
+local function CollectPrivilegeReasonsFromAttributes(target, reasons, label)
+    if not target then
+        return
+    end
+
+    for attrName, attrValue in pairs(target:GetAttributes()) do
+        if TextHasKeyword(attrName, ModDetectionValueKeywords) then
+            local flagged = false
+            if typeof(attrValue) == "boolean" then
+                flagged = attrValue
+            elseif typeof(attrValue) == "number" then
+                flagged = attrValue > 0
+            elseif typeof(attrValue) == "string" then
+                flagged = TextHasKeyword(attrValue, ModDetectionRoleKeywords) ~= nil
+            end
+            if flagged then
+                AddReasonUnique(reasons, string.format("%s attribute %s=%s", label, tostring(attrName), tostring(attrValue)))
+            end
+        end
+    end
+end
+
+local function CollectPrivilegeReasonsFromContainer(container, reasons, label)
+    if not container then
+        return
+    end
+
+    local function evaluateValueObject(obj, scope)
+        if not (obj:IsA("BoolValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("StringValue")) then
+            return
+        end
+        if not TextHasKeyword(obj.Name, ModDetectionValueKeywords) then
+            return
+        end
+
+        local value = obj.Value
+        local flagged = false
+        if obj:IsA("BoolValue") then
+            flagged = value == true
+        elseif obj:IsA("IntValue") or obj:IsA("NumberValue") then
+            flagged = tonumber(value) and tonumber(value) > 0
+        elseif obj:IsA("StringValue") then
+            local lower = string.lower(tostring(value or ""))
+            if lower ~= "" and lower ~= "none" and lower ~= "nonadmin" and lower ~= "member" then
+                flagged = TextHasKeyword(lower, ModDetectionRoleKeywords) ~= nil
+            end
+        end
+
+        if flagged then
+            AddReasonUnique(reasons, string.format("%s %s=%s", scope, obj.Name, tostring(value)))
+        end
+    end
+
+    for _, child in ipairs(container:GetChildren()) do
+        evaluateValueObject(child, label)
+        if child:IsA("Folder") or child:IsA("Configuration") then
+            for _, grand in ipairs(child:GetChildren()) do
+                evaluateValueObject(grand, label .. "/" .. child.Name)
+            end
+        end
+    end
+end
+
+local function GetModDetectionReasons(plr)
+    if not plr or plr == LocalPlayer then
+        return {}
+    end
+
+    LoadModDetectionScriptAccessUsers()
+    local reasons = {}
+    local lowerName = string.lower(plr.Name)
+    local lowerDisplay = string.lower(tostring(plr.DisplayName or ""))
+    if ModDetectionKnownPrivilegedNames[lowerName] or (lowerDisplay ~= "" and ModDetectionKnownPrivilegedNames[lowerDisplay]) then
+        AddReasonUnique(reasons, "known script access account")
+    end
+
+    local groupInfo = GetCachedGroupRoleInfo(plr)
+    local roleKeyword = TextHasKeyword(groupInfo.Role, ModDetectionRoleKeywords)
+    if roleKeyword and groupInfo.Rank > 0 then
+        AddReasonUnique(reasons, string.format("group role %s (rank %d)", tostring(groupInfo.Role), groupInfo.Rank))
+    elseif groupInfo.Rank >= 240 then
+        AddReasonUnique(reasons, string.format("high group rank %d", groupInfo.Rank))
+    end
+
+    CollectPrivilegeReasonsFromAttributes(plr, reasons, "player")
+    CollectPrivilegeReasonsFromAttributes(plr.Character, reasons, "character")
+    CollectPrivilegeReasonsFromContainer(plr, reasons, "player value")
+
+    local valueStats = plr:FindFirstChild("Valuestats")
+    if valueStats then
+        CollectPrivilegeReasonsFromContainer(valueStats, reasons, "valuestats")
+    end
+
+    return reasons
+end
+
+local function WarnIfPrivilegedPlayerPresent(plr)
+    if not plr or plr == LocalPlayer then
+        return
+    end
+
+    local key = BuildModDetectionUserKey(plr)
+    if ModDetectionFlaggedUsers[key] then
+        return
+    end
+
+    local reasons = GetModDetectionReasons(plr)
+    if #reasons == 0 then
+        return
+    end
+
+    ModDetectionFlaggedUsers[key] = table.concat(reasons, "; ")
+    local detail = reasons[1]
+    if #reasons > 1 then
+        detail = detail .. string.format(" (+%d more)", #reasons - 1)
+    end
+    Notify("Mod Detection", string.format("%s flagged: %s", plr.Name, detail), 7)
+end
+
+local function HandleModDetection(now)
+    if not Config.Misc.ModDetection then
+        return
+    end
+    if now - FeatureCooldowns.ModDetection < 3 then
+        return
+    end
+    FeatureCooldowns.ModDetection = now
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        WarnIfPrivilegedPlayerPresent(plr)
+    end
+end
+
+local function SetModDetectionEnabled(state)
+    Config.Misc.ModDetection = state
+    if state then
+        FeatureCooldowns.ModDetection = 0
+        HandleModDetection(tick())
+    end
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    task.delay(2, function()
+        if Config.Misc.ModDetection and plr and plr.Parent == Players then
+            WarnIfPrivilegedPlayerPresent(plr)
+        end
+    end)
 end)
 
+local function IsVehicleDriverSeat(seat)
+    if not seat or not seat:IsA("BasePart") then
+        return false
+    end
+    return seat.Name == "DriveSeat" or seat.Name == "BikeDriveSeat" or seat.Name == "ScooterSeat"
+end
 
--- [[ 5. UI SYSTEM (BIG MOBILE) ]] --
+local function GetVehicleModelFromSeat(seat)
+    if not seat then
+        return nil
+    end
+
+    local node = seat
+    while node and node ~= Workspace do
+        if node:IsA("Model") and (node:FindFirstChild("DriveSeat", true) or node:FindFirstChild("BikeDriveSeat", true) or node:FindFirstChild("Wheels", true) or node:FindFirstChild("CarType", true)) then
+            return node
+        end
+        node = node.Parent
+    end
+
+    return seat.Parent and seat.Parent:IsA("Model") and seat.Parent or nil
+end
+
+local function GetVehicleMotionRootPart(seat, vehicleModel)
+    local rootPart = seat
+    local body = vehicleModel and vehicleModel:FindFirstChild("Body")
+    local collisionPart = body and body:FindFirstChild("CollisionPart")
+    if collisionPart and collisionPart:IsA("BasePart") then
+        rootPart = collisionPart
+    end
+
+    if rootPart and rootPart:IsA("BasePart") then
+        return rootPart
+    end
+
+    return nil
+end
+
+local function ResetVehicleCrashState()
+    if VehicleCrashConnection then
+        VehicleCrashConnection:Disconnect()
+        VehicleCrashConnection = nil
+    end
+    if VehicleCrashDeathConnection then
+        VehicleCrashDeathConnection:Disconnect()
+        VehicleCrashDeathConnection = nil
+    end
+    if VehicleCrashState.Humanoid and VehicleCrashState.OriginalBreakJointsOnDeath ~= nil then
+        pcall(function()
+            VehicleCrashState.Humanoid.BreakJointsOnDeath = VehicleCrashState.OriginalBreakJointsOnDeath
+        end)
+    end
+    VehicleCrashState.Seat = nil
+    VehicleCrashState.Humanoid = nil
+    VehicleCrashState.OriginalBreakJointsOnDeath = nil
+    VehicleCrashState.LastTick = 0
+    VehicleCrashState.LastSpeed = 0
+    VehicleCrashState.LastHealth = 0
+end
+
+local function GetVehicleMultiplierFromName(name)
+    local key = string.lower(tostring(name or ""))
+    if key == "" then
+        return nil
+    end
+
+    if string.find(key, "steer", 1, true) or string.find(key, "turn", 1, true) or string.find(key, "yaw", 1, true) then
+        return Config.Vehicle.SteerMult
+    end
+    if string.find(key, "brake", 1, true) then
+        return Config.Vehicle.BrakeMult
+    end
+    if string.find(key, "torque", 1, true) or string.find(key, "horse", 1, true) or string.find(key, "accel", 1, true) or string.find(key, "engine", 1, true) or string.find(key, "power", 1, true) or string.find(key, "boost", 1, true) then
+        return Config.Vehicle.AccelMult
+    end
+    if string.find(key, "speed", 1, true) or string.find(key, "topspeed", 1, true) or string.find(key, "maxvel", 1, true) or string.find(key, "velocity", 1, true) then
+        return Config.Vehicle.SpeedMult
+    end
+
+    return nil
+end
+
+local function RestoreVehicleModdedState()
+    for inst, original in pairs(VehicleOriginalValueObjects) do
+        if inst and inst.Parent then
+            pcall(function()
+                inst.Value = original
+            end)
+        end
+    end
+    VehicleOriginalValueObjects = {}
+
+    for obj, attrs in pairs(VehicleOriginalAttributes) do
+        if obj and obj.Parent then
+            for attrName, original in pairs(attrs) do
+                pcall(function()
+                    obj:SetAttribute(attrName, original)
+                end)
+            end
+        end
+    end
+    VehicleOriginalAttributes = {}
+
+    for seat, props in pairs(VehicleOriginalSeatProperties) do
+        if seat and seat.Parent then
+            for propName, original in pairs(props) do
+                pcall(function()
+                    seat[propName] = original
+                end)
+            end
+        end
+    end
+    VehicleOriginalSeatProperties = {}
+end
+
+local function ApplyVehicleModsForSeat(seat, vehicleModel)
+    if not seat or not vehicleModel then
+        return
+    end
+
+    local descendants = vehicleModel:GetDescendants()
+    for _, inst in ipairs(descendants) do
+        if (inst:IsA("NumberValue") or inst:IsA("IntValue")) and not inst:FindFirstAncestorWhichIsA("Sound") then
+            local mult = GetVehicleMultiplierFromName(inst.Name)
+            if mult then
+                local current = tonumber(inst.Value)
+                if current ~= nil then
+                    if VehicleOriginalValueObjects[inst] == nil then
+                        VehicleOriginalValueObjects[inst] = current
+                    end
+                    local target = VehicleOriginalValueObjects[inst] * mult
+                    if inst:IsA("IntValue") then
+                        target = math.floor(target + 0.5)
+                    end
+                    pcall(function()
+                        inst.Value = target
+                    end)
+                end
+            end
+        end
+
+        local attrs = inst:GetAttributes()
+        for attrName, attrValue in pairs(attrs) do
+            if typeof(attrValue) == "number" then
+                local mult = GetVehicleMultiplierFromName(attrName)
+                if mult then
+                    local store = VehicleOriginalAttributes[inst]
+                    if not store then
+                        store = {}
+                        VehicleOriginalAttributes[inst] = store
+                    end
+                    if store[attrName] == nil then
+                        store[attrName] = attrValue
+                    end
+                    pcall(function()
+                        inst:SetAttribute(attrName, store[attrName] * mult)
+                    end)
+                end
+            end
+        end
+    end
+
+    if seat:IsA("VehicleSeat") then
+        local seatProps = VehicleOriginalSeatProperties[seat]
+        if not seatProps then
+            seatProps = {}
+            VehicleOriginalSeatProperties[seat] = seatProps
+        end
+
+        local seatMultipliers = {
+            MaxSpeed = Config.Vehicle.SpeedMult,
+            Torque = Config.Vehicle.AccelMult,
+            TurnSpeed = Config.Vehicle.SteerMult
+        }
+
+        for propName, mult in pairs(seatMultipliers) do
+            local ok, current = pcall(function()
+                return seat[propName]
+            end)
+            if ok and typeof(current) == "number" then
+                if seatProps[propName] == nil then
+                    seatProps[propName] = current
+                end
+                pcall(function()
+                    seat[propName] = seatProps[propName] * mult
+                end)
+            end
+        end
+    end
+end
+
+local function ApplyVehicleForwardBoost(seat, vehicleModel)
+    if Config.Vehicle.SpeedMult <= 1 or not seat then
+        return
+    end
+
+    local rootPart = GetVehicleMotionRootPart(seat, vehicleModel)
+    if not rootPart then
+        return
+    end
+
+    local boost = (Config.Vehicle.SpeedMult - 1) * 6
+    local baseVelocity = rootPart.AssemblyLinearVelocity
+    local velocity = baseVelocity
+    local look = seat.CFrame.LookVector
+
+    if MoveKeys[Enum.KeyCode.W] then
+        velocity = velocity + look * boost
+    end
+    if MoveKeys[Enum.KeyCode.S] then
+        local reverseScale = Config.Vehicle.NoCrashDamage and 0.25 or 0.75
+        velocity = velocity - look * (boost * reverseScale)
+    end
+    if Config.Vehicle.BrakeMult > 1 and not MoveKeys[Enum.KeyCode.W] and not MoveKeys[Enum.KeyCode.S] then
+        local brakeFactor
+        if Config.Vehicle.NoCrashDamage then
+            brakeFactor = math.max(0.96, 1 - ((Config.Vehicle.BrakeMult - 1) * 0.012))
+        else
+            brakeFactor = math.max(0.85, 1 - ((Config.Vehicle.BrakeMult - 1) * 0.04))
+        end
+        velocity = velocity * brakeFactor
+    end
+
+    local delta = velocity - baseVelocity
+    local maxDelta
+    if Config.Vehicle.NoCrashDamage then
+        maxDelta = 4 + (Config.Vehicle.AccelMult * 1.5)
+    else
+        maxDelta = 9 + (Config.Vehicle.AccelMult * 2.5)
+    end
+    if delta.Magnitude > maxDelta then
+        delta = delta.Unit * maxDelta
+    end
+
+    rootPart.AssemblyLinearVelocity = baseVelocity + delta
+end
+
+local function HandleVehicleCrashProtection(now, hum, seat, vehicleModel)
+    if not Config.Vehicle.NoCrashDamage or not hum or hum.Health <= 0 then
+        ResetVehicleCrashState()
+        return
+    end
+
+    local rootPart = GetVehicleMotionRootPart(seat, vehicleModel)
+    if not rootPart then
+        return
+    end
+
+    local speed = rootPart.AssemblyLinearVelocity.Magnitude
+    local health = hum.Health
+
+    if VehicleCrashState.Seat ~= seat or VehicleCrashState.Humanoid ~= hum then
+        VehicleCrashState.Seat = seat
+        VehicleCrashState.Humanoid = hum
+        VehicleCrashState.LastTick = now
+        VehicleCrashState.LastSpeed = speed
+        VehicleCrashState.LastHealth = health
+        local okBreakJoints, breakJointsOnDeath = pcall(function()
+            return hum.BreakJointsOnDeath
+        end)
+        if okBreakJoints then
+            VehicleCrashState.OriginalBreakJointsOnDeath = breakJointsOnDeath
+            pcall(function()
+                hum.BreakJointsOnDeath = false
+            end)
+        end
+        if VehicleCrashConnection then
+            VehicleCrashConnection:Disconnect()
+        end
+        if VehicleCrashDeathConnection then
+            VehicleCrashDeathConnection:Disconnect()
+        end
+        VehicleCrashConnection = hum.HealthChanged:Connect(function(newHealth)
+            if not Config.Vehicle.NoCrashDamage then
+                return
+            end
+
+            local activeSeat = hum.SeatPart
+            if not IsVehicleDriverSeat(activeSeat) then
+                return
+            end
+
+            local floorHealth = math.max(VehicleCrashState.LastHealth, math.min(hum.MaxHealth, 25))
+            if newHealth < floorHealth then
+                pcall(function()
+                    hum.Health = floorHealth
+                    if newHealth <= 0 then
+                        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                    end
+                end)
+            else
+                VehicleCrashState.LastHealth = newHealth
+            end
+        end)
+        VehicleCrashDeathConnection = hum.StateChanged:Connect(function(_, newState)
+            if not Config.Vehicle.NoCrashDamage then
+                return
+            end
+            if newState ~= Enum.HumanoidStateType.Dead then
+                return
+            end
+            if not IsVehicleDriverSeat(hum.SeatPart) then
+                return
+            end
+
+            local recoverHealth = math.max(VehicleCrashState.LastHealth, math.min(hum.MaxHealth, 25))
+            pcall(function()
+                hum.Health = recoverHealth
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end)
+        end)
+        return
+    end
+
+    local floorHealth = math.max(VehicleCrashState.LastHealth, math.min(hum.MaxHealth, 25))
+    if health < floorHealth then
+        local restoredHealth = math.min(hum.MaxHealth, floorHealth)
+        pcall(function()
+            hum.Health = restoredHealth
+        end)
+        health = hum.Health
+    end
+
+    VehicleCrashState.LastTick = now
+    VehicleCrashState.LastSpeed = speed
+    VehicleCrashState.LastHealth = health
+end
+
+local function HandleVehicleMods(now)
+    local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if not IsVehicleDriverSeat(seat) then
+        if VehicleModsActive then
+            RestoreVehicleModdedState()
+            VehicleModsActive = false
+        end
+        ResetVehicleCrashState()
+        return
+    end
+
+    local vehicleModel = GetVehicleModelFromSeat(seat)
+    if Config.Vehicle.Enabled then
+        if vehicleModel and now - FeatureCooldowns.Vehicle >= 0.2 then
+            FeatureCooldowns.Vehicle = now
+            ApplyVehicleModsForSeat(seat, vehicleModel)
+            VehicleModsActive = true
+        elseif not vehicleModel and VehicleModsActive then
+            RestoreVehicleModdedState()
+            VehicleModsActive = false
+        end
+
+        ApplyVehicleForwardBoost(seat, vehicleModel)
+    elseif VehicleModsActive then
+        RestoreVehicleModdedState()
+        VehicleModsActive = false
+    end
+
+    HandleVehicleCrashProtection(now, hum, seat, vehicleModel)
+end
+
+local function SetVehicleModsEnabled(state)
+    Config.Vehicle.Enabled = state
+    if not state then
+        RestoreVehicleModdedState()
+        VehicleModsActive = false
+        ResetVehicleCrashState()
+    end
+end
+
+local function SetToggleState(toggle, state)
+    if not toggle then
+        return
+    end
+
+    if state then
+        if not toggle:getState() then
+            toggle:enable()
+        end
+    else
+        if toggle:getState() then
+            toggle:disable()
+        end
+    end
+end
+
+local function SetSliderValue(slider, value)
+    if slider and typeof(value) == "number" then
+        slider:setValue(value)
+    end
+end
+
+-- [[ 6B. MOBILE GUI ]] --
+local ExistingGui = nil
+pcall(function()
+    local root = nil
+    if gethui then
+        local ok, hui = pcall(gethui)
+        if ok then
+            root = hui
+        end
+    end
+    if not root then
+        root = CoreGui
+    end
+    if root then
+        ExistingGui = root:FindFirstChild("FocusNativeBig")
+        if ExistingGui then
+            ExistingGui:Destroy()
+        end
+    end
+end)
+
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "FocusNativeBig"
-pcall(function() if gethui then ScreenGui.Parent = gethui() elseif CoreGui then ScreenGui.Parent = CoreGui else ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end end)
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-local MainFrame, ToggleBtn
+local guiParent = nil
+if gethui then
+    local ok, hui = pcall(gethui)
+    if ok then
+        guiParent = hui
+    end
+end
+if not guiParent and CoreGui then
+    guiParent = CoreGui
+end
+if not guiParent then
+    guiParent = LocalPlayer:WaitForChild("PlayerGui")
+end
+ScreenGui.Parent = guiParent
 
--- > Mobile Toggle Button (BIGGER)
-ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Name = "MobileToggle"
-ToggleBtn.Size = UDim2.new(0, 80, 0, 80)
-ToggleBtn.Position = UDim2.new(1, -90, 0.4, 0)
-ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
-ToggleBtn.Text = "🛡️"
-ToggleBtn.TextSize = 40
-ToggleBtn.Parent = ScreenGui
-Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 20)
-
--- > Main Window (BIGGER)
-MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 360, 0, 480)
-MainFrame.Position = UDim2.new(1, -460, 0.4, -200)
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "Main"
+MainFrame.Size = UDim2.new(0, 390, 0, 530)
+MainFrame.Position = UDim2.new(1, -520, 0.5, -265)
 MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.BorderSizePixel = 0
 MainFrame.Visible = false
 MainFrame.Active = true
 MainFrame.Parent = ScreenGui
 Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
 
-ToggleBtn.MouseButton1Click:Connect(function() MainFrame.Visible = not MainFrame.Visible end)
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Name = "MobileToggle"
+ToggleBtn.Size = UDim2.new(0, 72, 0, 72)
+ToggleBtn.Position = UDim2.new(1, -84, 0.45, 0)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
+ToggleBtn.Text = "F"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.TextSize = 36
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.Parent = ScreenGui
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 18)
 
--- > Header & Tabs
+ToggleBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
 local Title = Instance.new("TextLabel")
-Title.Text = "FocusMobile"; Title.Size = UDim2.new(1, -20, 0, 40); Title.Position = UDim2.new(0, 15, 0, 5)
-Title.BackgroundTransparency = 1; Title.TextColor3 = Color3.fromRGB(255, 255, 255); Title.Font = Enum.Font.GothamBold; Title.TextSize = 24; Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Text = "Focus Mobile"
+Title.Size = UDim2.new(1, -20, 0, 38)
+Title.Position = UDim2.new(0, 12, 0, 6)
+Title.BackgroundTransparency = 1
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 24
+Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = MainFrame
 
-local TabContainer = Instance.new("Frame")
-TabContainer.Size = UDim2.new(1, -20, 0, 45); TabContainer.Position = UDim2.new(0, 10, 0, 50)
-TabContainer.BackgroundTransparency = 1; TabContainer.Parent = MainFrame
-local TabList = Instance.new("UIListLayout"); TabList.Parent = TabContainer; TabList.FillDirection = Enum.FillDirection.Horizontal; TabList.Padding = UDim.new(0, 8)
+local TabContainer = Instance.new("ScrollingFrame")
+TabContainer.Name = "TabContainer"
+TabContainer.Size = UDim2.new(1, -20, 0, 42)
+TabContainer.Position = UDim2.new(0, 10, 0, 48)
+TabContainer.BackgroundTransparency = 1
+TabContainer.BorderSizePixel = 0
+TabContainer.ScrollBarThickness = 4
+TabContainer.ScrollingDirection = Enum.ScrollingDirection.X
+TabContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+TabContainer.Parent = MainFrame
+
+local TabButtonsHolder = Instance.new("Frame")
+TabButtonsHolder.BackgroundTransparency = 1
+TabButtonsHolder.Size = UDim2.new(0, 0, 1, 0)
+TabButtonsHolder.Parent = TabContainer
+
+local TabListLayout = Instance.new("UIListLayout")
+TabListLayout.FillDirection = Enum.FillDirection.Horizontal
+TabListLayout.Padding = UDim.new(0, 6)
+TabListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TabListLayout.Parent = TabButtonsHolder
+
+TabListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    local width = TabListLayout.AbsoluteContentSize.X
+    TabButtonsHolder.Size = UDim2.new(0, width, 1, 0)
+    TabContainer.CanvasSize = UDim2.new(0, width + 10, 0, 0)
+end)
 
 local ContentContainer = Instance.new("Frame")
-ContentContainer.Size = UDim2.new(1, -20, 1, -110); ContentContainer.Position = UDim2.new(0, 10, 0, 105)
-ContentContainer.BackgroundTransparency = 1; ContentContainer.Parent = MainFrame
+ContentContainer.Size = UDim2.new(1, -20, 1, -98)
+ContentContainer.Position = UDim2.new(0, 10, 0, 90)
+ContentContainer.BackgroundTransparency = 1
+ContentContainer.Parent = MainFrame
 
--- > Tab Helper
 local CurrentTab = nil
+
+local function BindPageCanvas(page, layout)
+    local function UpdateCanvas()
+        page.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+    end
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(UpdateCanvas)
+    UpdateCanvas()
+end
+
 local function CreateTab(name)
     local btn = Instance.new("TextButton")
-    btn.Text = name; btn.Size = UDim2.new(0, 75, 1, 0) -- Wider Tabs
-    btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45); btn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    btn.Font = Enum.Font.GothamBold; btn.TextSize = 16; btn.Parent = TabContainer
+    btn.Text = name
+    btn.Size = UDim2.new(0, 76, 1, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    btn.TextColor3 = Color3.fromRGB(210, 210, 210)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 14
+    btn.BorderSizePixel = 0
+    btn.Parent = TabButtonsHolder
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-    
+
     local page = Instance.new("ScrollingFrame")
-    page.Size = UDim2.new(1, 0, 1, 0); page.BackgroundTransparency = 1; page.Visible = false; page.Parent = ContentContainer
-    page.ScrollBarThickness = 6 -- Thicker Scrollbar
-    local layout = Instance.new("UIListLayout"); layout.Parent = page; layout.Padding = UDim.new(0, 10); layout.SortOrder = Enum.SortOrder.LayoutOrder
-    
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.Visible = false
+    page.ScrollBarThickness = 5
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.Parent = ContentContainer
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = page
+    BindPageCanvas(page, layout)
+
     btn.MouseButton1Click:Connect(function()
-        if CurrentTab then CurrentTab.Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45); CurrentTab.Page.Visible = false end
-        CurrentTab = {Btn = btn, Page = page}
-        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 100); page.Visible = true
+        if CurrentTab then
+            CurrentTab.Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+            CurrentTab.Page.Visible = false
+        end
+        CurrentTab = { Btn = btn, Page = page }
+        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
+        page.Visible = true
     end)
-    
-    if CurrentTab == nil then 
-        CurrentTab = {Btn = btn, Page = page}
-        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 100); page.Visible = true
+
+    if CurrentTab == nil then
+        CurrentTab = { Btn = btn, Page = page }
+        btn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
+        page.Visible = true
     end
-    
+
     return page
 end
 
--- > Element Helpers
-local function AddToggle(page, text, default, cb)
-    local f = Instance.new("Frame"); f.Size = UDim2.new(1, 0, 0, 55); f.BackgroundColor3 = Color3.fromRGB(35, 35, 40); f.Parent = page
+local function AddButton(page, text, cb)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 48)
+    f.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    f.BorderSizePixel = 0
+    f.Parent = page
     Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
-    local l = Instance.new("TextLabel"); l.Text = text; l.Size = UDim2.new(0.65, 0, 1, 0); l.Position = UDim2.new(0.05, 0, 0, 0); l.BackgroundTransparency = 1
-    l.TextColor3 = Color3.fromRGB(255, 255, 255); l.Font = Enum.Font.Gotham; l.TextSize = 18; l.TextXAlignment = Enum.TextXAlignment.Left; l.Parent = f
-    local b = Instance.new("TextButton"); b.Text = ""; b.Size = UDim2.new(0, 60, 0, 30); b.Position = UDim2.new(0.75, 0, 0.5, -15); b.Parent = f
-    b.BackgroundColor3 = default and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(60, 60, 60)
-    Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
-    local on = default
-    b.MouseButton1Click:Connect(function() on = not on; b.BackgroundColor3 = on and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(60, 60, 60); cb(on) end)
-end
 
-local function AddSlider(page, text, min, max, default, cb)
-    local f = Instance.new("Frame"); f.Size = UDim2.new(1, 0, 0, 65); f.BackgroundColor3 = Color3.fromRGB(35, 35, 40); f.Parent = page
-    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
-    local l = Instance.new("TextLabel"); l.Text = text .. ": " .. default; l.Size = UDim2.new(1, 0, 0, 25); l.Position = UDim2.new(0.05, 0, 0, 5); l.BackgroundTransparency = 1
-    l.TextColor3 = Color3.fromRGB(255, 255, 255); l.Font = Enum.Font.Gotham; l.TextSize = 18; l.TextXAlignment = Enum.TextXAlignment.Left; l.Parent = f
-    local bg = Instance.new("TextButton"); bg.Text = ""; bg.Size = UDim2.new(0.9, 0, 0, 15); bg.Position = UDim2.new(0.05, 0, 0, 35); bg.BackgroundColor3 = Color3.fromRGB(60, 60, 60); bg.Parent = f
-    local fill = Instance.new("Frame"); fill.Size = UDim2.new((default-min)/(max-min), 0, 1, 0); fill.BackgroundColor3 = Color3.fromRGB(0, 180, 100); fill.BorderSizePixel = 0; fill.Parent = bg
-    bg.MouseButton1Down:Connect(function()
-        local c; c = UserInputService.InputChanged:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
-                local s = math.clamp((i.Position.X - bg.AbsolutePosition.X)/bg.AbsoluteSize.X, 0, 1)
-                local v = math.floor(min + ((max-min)*s))
-                fill.Size = UDim2.new(s, 0, 1, 0); l.Text = text .. ": " .. v; cb(v)
-            end
-        end)
-        UserInputService.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then c:Disconnect() end end)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.9, 0, 0, 34)
+    b.Position = UDim2.new(0.05, 0, 0.5, -17)
+    b.BackgroundColor3 = Color3.fromRGB(0, 135, 78)
+    b.BorderSizePixel = 0
+    b.Text = text
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 15
+    b.Parent = f
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+
+    b.MouseButton1Click:Connect(function()
+        cb()
     end)
 end
 
--- [[ 6. POPULATE TABS ]] --
+local function AddToggle(page, text, default, cb)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 54)
+    f.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    f.BorderSizePixel = 0
+    f.Parent = page
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
 
--- > COMBAT
-local PageCombat = CreateTab("Aim")
-AddToggle(PageCombat, "Silent Aim", false, function(v) Config.SilentAim.Enabled = v end)
-AddToggle(PageCombat, "Show FOV", false, function(v) Config.SilentAim.ShowFOV = v; FOVCircle.Visible = v end)
-AddToggle(PageCombat, "Red Chams", false, function(v) Config.SilentAim.Visuals = v; if not v and CurrentHighlight then CurrentHighlight:Destroy() end end)
-AddSlider(PageCombat, "FOV Size", 10, 500, 200, function(v) Config.SilentAim.FOV = v; FOVCircle.Radius = v end)
-AddToggle(PageCombat, "Inf Ammo", false, function(v) Config.Combat.InfAmmo = v end)
-AddToggle(PageCombat, "Rapid Fire", false, function(v) Config.Combat.RapidFire = v end)
+    local l = Instance.new("TextLabel")
+    l.Text = text
+    l.Size = UDim2.new(0.62, 0, 1, 0)
+    l.Position = UDim2.new(0.05, 0, 0, 0)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.fromRGB(255, 255, 255)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 16
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = f
 
--- > VISUALS
-local PageVis = CreateTab("ESP")
-AddToggle(PageVis, "Enable ESP", false, function(v) Config.Visuals.Enabled = v; if not v then for _,p in pairs(ESP_Storage) do for _,d in pairs(p) do d.Visible=false end end end end)
-AddToggle(PageVis, "Box ESP", false, function(v) Config.Visuals.Box = v end)
-AddToggle(PageVis, "Name ESP", false, function(v) Config.Visuals.Name = v end)
-AddToggle(PageVis, "Health ESP", false, function(v) Config.Visuals.Health = v end)
-AddToggle(PageVis, "Weapon ESP", false, function(v) Config.Visuals.Tool = v end)
-AddSlider(PageVis, "Dist", 100, 5000, 2000, function(v) Config.Visuals.MaxDist = v end)
+    local b = Instance.new("TextButton")
+    b.Text = ""
+    b.Size = UDim2.new(0, 62, 0, 30)
+    b.Position = UDim2.new(1, -75, 0.5, -15)
+    b.BorderSizePixel = 0
+    b.Parent = f
+    Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
 
--- > MOVEMENT
-local PageMove = CreateTab("Mov")
-AddToggle(PageMove, "Fly", false, function(v) Config.Movement.FlyEnabled = v; UpdateMovers(v, "Fly") end)
-AddSlider(PageMove, "Fly Spd", 10, 45, 45, function(v) Config.Movement.FlySpeed = v end)
-AddToggle(PageMove, "Slide", false, function(v) Config.Movement.SlideEnabled = v; UpdateMovers(v, "Slide") end)
-AddToggle(PageMove, "Noclip", false, function(v) Config.Movement.Noclip = v; if v then NoclipConnection=RunService.Stepped:Connect(function() if LocalPlayer.Character then for _,p in pairs(LocalPlayer.Character:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide=false end end end end) else if NoclipConnection then NoclipConnection:Disconnect() end end end)
-AddToggle(PageMove, "Inf Stamina", false, function(v) Config.Misc.InfStamina = v end)
+    local on = default == true
+    local function ApplyState(state, fireCallback)
+        on = state == true
+        b.BackgroundColor3 = on and Color3.fromRGB(0, 235, 120) or Color3.fromRGB(65, 65, 70)
+        if fireCallback ~= false then
+            cb(on)
+        end
+    end
 
--- > FARMING
+    b.MouseButton1Click:Connect(function()
+        ApplyState(not on, true)
+    end)
+
+    ApplyState(on, false)
+
+    local control = {}
+    function control:getState()
+        return on
+    end
+    function control:enable()
+        ApplyState(true, true)
+    end
+    function control:disable()
+        ApplyState(false, true)
+    end
+    return control
+end
+
+local function AddSlider(page, text, min, max, default, cb)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 70)
+    f.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    f.BorderSizePixel = 0
+    f.Parent = page
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -14, 0, 24)
+    l.Position = UDim2.new(0, 10, 0, 6)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.fromRGB(255, 255, 255)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 16
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = f
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(0.9, 0, 0, 14)
+    bg.Position = UDim2.new(0.05, 0, 0, 42)
+    bg.BackgroundColor3 = Color3.fromRGB(62, 62, 66)
+    bg.BorderSizePixel = 0
+    bg.Parent = f
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
+    fill.BorderSizePixel = 0
+    fill.Parent = bg
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local value = default
+    local dragging = false
+
+    local function SetValue(raw, fireCallback)
+        local clamped = math.clamp(math.floor(raw + 0.5), min, max)
+        value = clamped
+        local alpha = (clamped - min) / math.max((max - min), 1)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        l.Text = string.format("%s: %d", text, clamped)
+        if fireCallback ~= false then
+            cb(clamped)
+        end
+    end
+
+    local function UpdateFromInput(input)
+        local alpha = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
+        local scaled = min + ((max - min) * alpha)
+        SetValue(scaled, true)
+    end
+
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            UpdateFromInput(input)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            UpdateFromInput(input)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    SetValue(default, false)
+
+    local control = {}
+    function control:setValue(v)
+        SetValue(v, true)
+    end
+    return control
+end
+
+local function AddTextboxRow(page, label, defaultText, cb)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 54)
+    f.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    f.BorderSizePixel = 0
+    f.Parent = page
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+
+    local l = Instance.new("TextLabel")
+    l.Text = label
+    l.Size = UDim2.new(0.55, 0, 1, 0)
+    l.Position = UDim2.new(0.05, 0, 0, 0)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.fromRGB(255, 255, 255)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 16
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = f
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0.33, 0, 0, 32)
+    box.Position = UDim2.new(1, -138, 0.5, -16)
+    box.BackgroundColor3 = Color3.fromRGB(55, 55, 60)
+    box.TextColor3 = Color3.fromRGB(255, 255, 255)
+    box.Font = Enum.Font.GothamBold
+    box.TextSize = 16
+    box.ClearTextOnFocus = false
+    box.Text = tostring(defaultText or "")
+    box.BorderSizePixel = 0
+    box.Parent = f
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
+
+    box.FocusLost:Connect(function()
+        cb(box.Text)
+    end)
+
+    local control = {}
+    function control:setText(value)
+        box.Text = tostring(value or "")
+    end
+    function control:setValue(value)
+        box.Text = tostring(value or "")
+    end
+    function control:set(value)
+        box.Text = tostring(value or "")
+    end
+    return control
+end
+
+local function TeleportTo(pos)
+    local _, root = GetHumanoidAndRoot(GetCharacter())
+    if root then
+        root.CFrame = CFrame.new(pos)
+    end
+end
+
+-- Tabs
+local PageAim = CreateTab("Aim")
+local PageESP = CreateTab("ESP")
+local PageMove = CreateTab("Move")
 local PageFarm = CreateTab("Farm")
-AddSlider(PageFarm, "Speed", 10, 30, 30, function(v) Config.Autofarm.Speed = v end)
-AddToggle(PageFarm, "Spill Auto", false, function(v)
-    Config.Autofarm.Enabled = v
-    if v then
-        task.spawn(function()
-            local sys = Workspace:FindFirstChild("SpillSystem")
-            while Config.Autofarm.Enabled and sys do
-                for _, spill in pairs(sys:GetChildren()) do
-                    if not Config.Autofarm.Enabled then break end
-                    local target = (spill:IsA("Model") and spill.PrimaryPart) or (spill:IsA("BasePart") and spill)
-                    if target and IsSpillDirty(spill) then
-                        if TweenTo(target.Position) and Config.Autofarm.Enabled then
-                            if IsSpillDirty(spill) then CleanSpill(spill) task.wait(Config.Autofarm.WaitTime) end
-                        end
-                    end
-                end
-                task.wait(1)
+local PageTP = CreateTab("TP")
+local PageVehicle = CreateTab("Vehicle")
+local PageSettings = CreateTab("Settings")
+
+-- Aim + Gun Mods
+Controls.SilentAimEnabled = AddToggle(PageAim, "Silent Aim", false, function(v) Config.SilentAim.Enabled = v end)
+Controls.SilentAimShowFOV = AddToggle(PageAim, "Show FOV Circle", false, function(v) Config.SilentAim.ShowFOV = v; FOVCircle.Visible = v end)
+Controls.SilentAimVisuals = AddToggle(PageAim, "Red Target Chams", false, function(v)
+    Config.SilentAim.Visuals = v
+    if not v and CurrentHighlight then
+        CurrentHighlight:Destroy()
+        CurrentHighlight = nil
+    end
+end)
+Controls.SilentAimFOV = AddSlider(PageAim, "FOV Radius", 10, 500, 200, function(v)
+    Config.SilentAim.FOV = v
+    FOVCircle.Radius = v
+end)
+Controls.SilentAimWallCheck = AddToggle(PageAim, "Wall Check", true, function(v) Config.SilentAim.WallCheck = v end)
+Controls.SilentAimHitChance = AddSlider(PageAim, "Hit Chance %", 0, 100, 100, function(v) Config.SilentAim.HitChance = v end)
+AddButton(PageAim, "Target: Head", function() Config.SilentAim.TargetPart = "Head"; Notify("Silent Aim", "Target part set to Head") end)
+AddButton(PageAim, "Target: RootPart", function() Config.SilentAim.TargetPart = "HumanoidRootPart"; Notify("Silent Aim", "Target part set to HumanoidRootPart") end)
+AddButton(PageAim, "Target: UpperTorso", function() Config.SilentAim.TargetPart = "UpperTorso"; Notify("Silent Aim", "Target part set to UpperTorso") end)
+
+Controls.CombatInfAmmo = AddToggle(PageAim, "Infinite Ammo", false, function(v) Config.Combat.InfAmmo = v end)
+Controls.CombatRapidFire = AddToggle(PageAim, "Rapid Fire", false, function(v) Config.Combat.RapidFire = v end)
+Controls.CombatNoRecoil = AddToggle(PageAim, "No Recoil", false, function(v) Config.Combat.NoRecoil = v end)
+
+-- ESP
+Controls.ESPEnabled = AddToggle(PageESP, "Master Switch", false, function(v)
+    Config.Visuals.Enabled = v
+    if not v then
+        for _, p in pairs(ESP_Storage) do
+            for _, d in pairs(p) do
+                d.Visible = false
             end
-        end)
+        end
     end
 end)
-AddToggle(PageFarm, "Cash Magnet", false, function(v) Config.Misc.CashPickup = v end)
+Controls.ESPBoxes = AddToggle(PageESP, "Boxes", false, function(v) Config.Visuals.Box = v end)
+Controls.ESPNames = AddToggle(PageESP, "Names", false, function(v) Config.Visuals.Name = v end)
+Controls.ESPHealth = AddToggle(PageESP, "Health Bar", false, function(v) Config.Visuals.Health = v end)
+Controls.ESPTool = AddToggle(PageESP, "Held Weapon", false, function(v) Config.Visuals.Tool = v end)
+Controls.ESPTracers = AddToggle(PageESP, "Tracers", false, function(v) Config.Visuals.Tracer = v end)
+Controls.ESPDistance = AddSlider(PageESP, "Render Distance", 100, 5000, 2500, function(v) Config.Visuals.MaxDist = v end)
 
--- > MISC (NEW TAB FOR ANTI-AFK)
-local PageMisc = CreateTab("Misc")
-AddToggle(PageMisc, "Anti-AFK", false, function(v) 
-    Config.Misc.AntiAFK = v 
-    -- ADDED PRINT STATEMENT HERE:
-    if v then
-        print("[FocusMobile] Anti-AFK is now ACTIVE. You are protected from 20-minute kicks.")
+-- Movement
+Controls.MovementSlide = AddToggle(PageMove, "Speed / Slide", false, function(v) SetSlideEnabled(v) end)
+Controls.MovementSlideSpeed = AddSlider(PageMove, "Slide Speed", 16, 45, 45, function(v) Config.Movement.SlideSpeed = v end)
+Controls.MovementFly = AddToggle(PageMove, "Fly", false, function(v) SetFlyEnabled(v) end)
+Controls.MovementFlySpeed = AddSlider(PageMove, "Fly Speed", 16, 45, 45, function(v) Config.Movement.FlySpeed = v end)
+Controls.MovementNoclip = AddToggle(PageMove, "Noclip", false, function(v) SetNoclipEnabled(v) end)
+Controls.MiscInfStamina = AddToggle(PageMove, "Infinite Stamina", false, function(v) Config.Misc.InfStamina = v end)
+
+-- Farm + Utils
+Controls.AutofarmSpeed = AddSlider(PageFarm, "Farm Speed", 10, 30, 30, function(v) Config.Autofarm.Speed = v end)
+Controls.AutofarmEnabled = AddToggle(PageFarm, "Spill Autofarm", false, function(v) SetAutofarmEnabled(v) end)
+Controls.AutofarmAirdrop = AddToggle(PageFarm, "Airdrop Autofarm", false, function(v) SetAirdropAutofarmEnabled(v) end)
+Controls.AutofarmAirdropRadius = AddSlider(PageFarm, "Airdrop Kill Radius", 15, 250, 75, function(v) Config.Autofarm.AirdropKillRadius = v end)
+Controls.AutofarmAirdropHop = AddToggle(PageFarm, "ServerHop Airdrop", false, function(v) SetAirdropServerHopEnabled(v) end)
+
+Controls.CashMagnet = AddToggle(PageFarm, "Cash Magnet", false, function(v) Config.Misc.CashPickup = v end)
+Controls.CashRange = AddSlider(PageFarm, "Cash Range", 1, 50, 25, function(v) Config.Misc.PickupRange = v end)
+Controls.LootMagnet = AddToggle(PageFarm, "Loot Magnet", false, function(v) Config.Misc.LootMagnet = v end)
+Controls.LootRange = AddSlider(PageFarm, "Loot Range", 5, 50, 30, function(v) Config.Misc.LootRange = v end)
+AddButton(PageFarm, "Inventory Viewer", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/inventoryviewer"))()
+end)
+
+-- Teleports
+AddButton(PageTP, "Sport Shop", function() TeleportTo(Vector3.new(-19, 4, -77)) end)
+AddButton(PageTP, "Gun Store", function() TeleportTo(Vector3.new(39, 4, 370)) end)
+AddButton(PageTP, "BankLog Bando", function() TeleportTo(Vector3.new(-195, 6, 255)) end)
+AddButton(PageTP, "The Royale", function() TeleportTo(Vector3.new(-360, 5, 286)) end)
+AddButton(PageTP, "Bank", function() TeleportTo(Vector3.new(-225, 4, 94)) end)
+AddButton(PageTP, "Idea", function() TeleportTo(Vector3.new(298, 4, -195)) end)
+AddButton(PageTP, "BlackMarket", function() TeleportTo(Vector3.new(259, 4, 428)) end)
+
+-- Vehicle
+Controls.VehicleEnabled = AddToggle(PageVehicle, "Enable Vehicle Mods", false, function(v) SetVehicleModsEnabled(v) end)
+Controls.VehicleSpeedMult = AddSlider(PageVehicle, "Speed Mult", 1, 10, 1, function(v) Config.Vehicle.SpeedMult = v end)
+Controls.VehicleAccelMult = AddSlider(PageVehicle, "Accel Mult", 1, 5, 1, function(v) Config.Vehicle.AccelMult = v end)
+Controls.VehicleBrakeMult = AddSlider(PageVehicle, "Brake Mult", 1, 5, 1, function(v) Config.Vehicle.BrakeMult = v end)
+Controls.VehicleSteerMult = AddSlider(PageVehicle, "Steer Mult", 1, 5, 1, function(v) Config.Vehicle.SteerMult = v end)
+Controls.VehicleNoCrashDamage = AddToggle(PageVehicle, "No Crash Damage", true, function(v) Config.Vehicle.NoCrashDamage = v end)
+
+-- Settings
+AddTextboxRow(PageSettings, "Config Name", ActiveConfigName, function(v)
+    ActiveConfigName = NormalizeConfigName(v)
+end)
+
+AddButton(PageSettings, "Save Config", function()
+    local ok, result = SaveConfig(ActiveConfigName)
+    if ok then
+        Notify("Config Saved", "Saved as " .. result .. ".json")
     else
-        print("[FocusMobile] Anti-AFK is now DISABLED.")
+        Notify("Save Failed", tostring(result))
     end
 end)
 
--- [[ 7. LOOPS ]] --
+AddButton(PageSettings, "Load Config", function()
+    local ok, result = LoadConfig(ActiveConfigName)
+    if ok then
+        Notify("Config Loaded", "Loaded " .. result .. ".json")
+    else
+        Notify("Load Failed", tostring(result))
+    end
+end)
+
+AddButton(PageSettings, "Delete Config", function()
+    local ok, result = DeleteConfig(ActiveConfigName)
+    if ok then
+        Notify("Config Deleted", "Deleted " .. result .. ".json")
+    else
+        Notify("Delete Failed", tostring(result))
+    end
+end)
+
+AddButton(PageSettings, "Load Last Saved", function()
+    local ok, result = LoadLastConfig()
+    if ok then
+        Notify("Last Loaded", "Loaded " .. result .. ".json")
+    else
+        Notify("Load Failed", tostring(result))
+    end
+end)
+
+AddButton(PageSettings, "List Configs", function()
+    local names, listErr = GetConfigNames()
+    if listErr then
+        Notify("List Failed", tostring(listErr))
+        return
+    end
+    if #names == 0 then
+        Notify("Configs", "No saved configs found")
+    else
+        Notify("Configs", table.concat(names, ", "), 5)
+    end
+end)
+
+AddButton(PageSettings, "Reset Defaults", function()
+    ResetConfigToDefaults()
+    Notify("Config Reset", "Defaults restored")
+end)
+
+AddButton(PageSettings, "Server Hop", function()
+    TryServerHop()
+end)
+
+AddButton(PageSettings, "Rejoin", function()
+    TryRejoin()
+end)
+
+Controls.SettingsAntiAFK = AddToggle(PageSettings, "Anti AFK", false, function(v)
+    SetAntiAfkEnabled(v)
+end)
+
+Controls.SettingsModDetection = AddToggle(PageSettings, "Mod Detection", false, function(v)
+    SetModDetectionEnabled(v)
+end)
+
+ApplyConfigToControls = function()
+    Config = ClampConfigValues(MergeWithDefaults(DefaultConfig, Config))
+
+    SetToggleState(Controls.SilentAimEnabled, Config.SilentAim.Enabled)
+    SetToggleState(Controls.SilentAimShowFOV, Config.SilentAim.ShowFOV)
+    SetToggleState(Controls.SilentAimVisuals, Config.SilentAim.Visuals)
+    SetSliderValue(Controls.SilentAimFOV, Config.SilentAim.FOV)
+    SetToggleState(Controls.SilentAimWallCheck, Config.SilentAim.WallCheck)
+    SetSliderValue(Controls.SilentAimHitChance, Config.SilentAim.HitChance)
+
+    SetToggleState(Controls.CombatInfAmmo, Config.Combat.InfAmmo)
+    SetToggleState(Controls.CombatRapidFire, Config.Combat.RapidFire)
+    SetToggleState(Controls.CombatNoRecoil, Config.Combat.NoRecoil)
+
+    SetToggleState(Controls.ESPEnabled, Config.Visuals.Enabled)
+    SetToggleState(Controls.ESPBoxes, Config.Visuals.Box)
+    SetToggleState(Controls.ESPNames, Config.Visuals.Name)
+    SetToggleState(Controls.ESPHealth, Config.Visuals.Health)
+    SetToggleState(Controls.ESPTool, Config.Visuals.Tool)
+    SetToggleState(Controls.ESPTracers, Config.Visuals.Tracer)
+    SetSliderValue(Controls.ESPDistance, Config.Visuals.MaxDist)
+
+    SetToggleState(Controls.MovementSlide, Config.Movement.SlideEnabled)
+    SetSliderValue(Controls.MovementSlideSpeed, Config.Movement.SlideSpeed)
+    SetToggleState(Controls.MovementFly, Config.Movement.FlyEnabled)
+    SetSliderValue(Controls.MovementFlySpeed, Config.Movement.FlySpeed)
+    SetToggleState(Controls.MovementNoclip, Config.Movement.Noclip)
+    SetToggleState(Controls.MiscInfStamina, Config.Misc.InfStamina)
+
+    SetSliderValue(Controls.AutofarmSpeed, Config.Autofarm.Speed)
+    SetToggleState(Controls.AutofarmEnabled, Config.Autofarm.Enabled)
+    SetToggleState(Controls.AutofarmAirdrop, Config.Autofarm.AirdropEnabled)
+    SetSliderValue(Controls.AutofarmAirdropRadius, Config.Autofarm.AirdropKillRadius)
+    SetToggleState(Controls.AutofarmAirdropHop, Config.Autofarm.AirdropServerHopEnabled)
+
+    SetToggleState(Controls.VehicleEnabled, Config.Vehicle.Enabled)
+    SetSliderValue(Controls.VehicleSpeedMult, Config.Vehicle.SpeedMult)
+    SetSliderValue(Controls.VehicleAccelMult, Config.Vehicle.AccelMult)
+    SetSliderValue(Controls.VehicleBrakeMult, Config.Vehicle.BrakeMult)
+    SetSliderValue(Controls.VehicleSteerMult, Config.Vehicle.SteerMult)
+    SetToggleState(Controls.VehicleNoCrashDamage, Config.Vehicle.NoCrashDamage)
+
+    SetToggleState(Controls.CashMagnet, Config.Misc.CashPickup)
+    SetSliderValue(Controls.CashRange, Config.Misc.PickupRange)
+    SetToggleState(Controls.LootMagnet, Config.Misc.LootMagnet)
+    SetSliderValue(Controls.LootRange, Config.Misc.LootRange)
+
+    SetToggleState(Controls.SettingsAntiAFK, Config.Misc.AntiAFK)
+    SetToggleState(Controls.SettingsModDetection, Config.Misc.ModDetection)
+    if Config.Misc.AntiAFK then
+        LastAntiAfkNudge = tick()
+    end
+
+    FOVCircle.Radius = Config.SilentAim.FOV
+    FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
+    if not Config.SilentAim.Visuals then
+        UpdateHighlight(nil)
+    end
+end
+
+local loadedLast, loadedName = LoadLastConfig()
+if loadedLast then
+    Notify("Config", "Auto-loaded " .. loadedName .. ".json", 2)
+else
+    ApplyConfigToControls()
+end
+
+LocalPlayer.Idled:Connect(function()
+    if not Config.Misc.AntiAFK then
+        return
+    end
+    TriggerAntiAfkInput()
+end)
+-- [[ 7. MAIN LOOPS ]] --
 RunService.RenderStepped:Connect(function()
+    local cam = GetCamera()
+    if not cam then
+        return
+    end
+
+    -- Silent Aim Logic (Visuals)
     FOVCircle.Position = UserInputService:GetMouseLocation()
     FOVCircle.Visible = Config.SilentAim.ShowFOV and Config.SilentAim.Enabled
-    if Config.SilentAim.Enabled then GetClosestTarget() else UpdateHighlight(nil) end
+    
+    if Config.SilentAim.Enabled then
+        GetClosestTarget() -- Updates Target & Chams
+    else
+        CurrentTarget = nil
+        CurrentTargetPart = nil
+        UpdateHighlight(nil)
+    end
+
+    -- ESP & Movement
     HandleESP()
+    EnsureMovementInstances()
     
-    local camCF = Camera.CFrame
+    local camCF = cam.CFrame
+    local look, right = camCF.LookVector, camCF.RightVector
     local moveDir = Vector3.zero
-    if MoveKeys[Enum.KeyCode.W] then moveDir = moveDir + camCF.LookVector end
-    if MoveKeys[Enum.KeyCode.S] then moveDir = moveDir - camCF.LookVector end
-    if MoveKeys[Enum.KeyCode.A] then moveDir = moveDir - camCF.RightVector end
-    if MoveKeys[Enum.KeyCode.D] then moveDir = moveDir + camCF.RightVector end
-    
-    if Config.Movement.FlyEnabled and Movers.FlyBV then
-        if moveDir.Magnitude > 0 then Movers.FlyBV.Velocity = moveDir.Unit * Config.Movement.FlySpeed; Movers.FlyBG.CFrame = CFrame.lookAt(Movers.FlyBV.Parent.Position, Movers.FlyBV.Parent.Position + moveDir)
+    if MoveKeys[Enum.KeyCode.W] then moveDir = moveDir + look end
+    if MoveKeys[Enum.KeyCode.S] then moveDir = moveDir - look end
+    if MoveKeys[Enum.KeyCode.A] then moveDir = moveDir - right end
+    if MoveKeys[Enum.KeyCode.D] then moveDir = moveDir + right end
+
+    if Config.Movement.FlyEnabled and Movers.FlyBV and Movers.FlyBG then
+        if moveDir.Magnitude > 0 then
+            Movers.FlyBV.Velocity = moveDir.Unit * Config.Movement.FlySpeed
+            Movers.FlyBG.CFrame = CFrame.lookAt(Movers.FlyBV.Parent.Position, Movers.FlyBV.Parent.Position + moveDir)
         else Movers.FlyBV.Velocity = Vector3.zero; Movers.FlyBG.CFrame = camCF end
     end
-    if Config.Movement.SlideEnabled and Movers.SlideBV then
-        local flatDir = Vector3.new(moveDir.X, 0, moveDir.Z)
-        if flatDir.Magnitude > 0 then Movers.SlideBV.Velocity = flatDir.Unit * Config.Movement.SlideSpeed; Movers.SlideBG.CFrame = CFrame.lookAt(Movers.SlideBV.Parent.Position, Movers.SlideBV.Parent.Position + flatDir)
+    if Config.Movement.SlideEnabled and Movers.SlideBV and Movers.SlideBG then
+        local flatLook = SafeUnit(Vector3.new(look.X, 0, look.Z))
+        local flatRight = SafeUnit(Vector3.new(right.X, 0, right.Z))
+        local flatDir = Vector3.zero
+        if MoveKeys[Enum.KeyCode.W] then flatDir = flatDir + flatLook end
+        if MoveKeys[Enum.KeyCode.S] then flatDir = flatDir - flatLook end
+        if MoveKeys[Enum.KeyCode.A] then flatDir = flatDir - flatRight end
+        if MoveKeys[Enum.KeyCode.D] then flatDir = flatDir + flatRight end
+        
+        if flatDir.Magnitude > 0 then
+            Movers.SlideBV.Velocity = flatDir.Unit * Config.Movement.SlideSpeed
+            Movers.SlideBG.CFrame = CFrame.lookAt(Movers.SlideBV.Parent.Position, Movers.SlideBV.Parent.Position + flatDir)
         else Movers.SlideBV.Velocity = Vector3.zero end
     end
-    
-    local char = LocalPlayer.Character
+
+    local now = tick()
+    HandleVehicleMods(now)
+    HandleModDetection(now)
+
+    -- Gun Mods
+    local char = GetCharacter()
     local tool = char and char:FindFirstChildWhichIsA("Tool")
-    if tool and tool:FindFirstChild("Stats") then
-        if Config.Combat.RapidFire then tool.Stats.FireRate.Value = 0; tool.Stats.GunType.Value = "Auto" end
-        if Config.Combat.NoRecoil then tool.Stats.Recoil.Value = 0 end
-        if Config.Combat.InfAmmo and tool.Stats.ClipSize.Value <= 0 then
-            ReplicatedStorage.GunRemotes.Reload:FireServer(tool, true)
-            tool.Stats.ClipSize.Value = tool.Stats.MaxAmmo.Value
+    local stats = tool and tool:FindFirstChild("Stats")
+    if stats then
+        local fireRate = stats:FindFirstChild("FireRate")
+        local gunType = stats:FindFirstChild("GunType")
+        local recoil = stats:FindFirstChild("Recoil")
+        local clipSize = stats:FindFirstChild("ClipSize")
+        local maxAmmo = stats:FindFirstChild("MaxAmmo")
+
+        if Config.Combat.RapidFire and fireRate and gunType then
+            fireRate.Value = 0
+            gunType.Value = "Auto"
+        end
+        if Config.Combat.NoRecoil and recoil then
+            recoil.Value = 0
+        end
+        if Config.Combat.InfAmmo and clipSize and maxAmmo and clipSize.Value <= 0 then
+            local gunRemotes = ReplicatedStorage:FindFirstChild("GunRemotes")
+            local reloadRemote = gunRemotes and gunRemotes:FindFirstChild("Reload")
+            if reloadRemote then
+                reloadRemote:FireServer(tool, true)
+            end
+            clipSize.Value = maxAmmo.Value
         end
     end
 end)
 
 RunService.Heartbeat:Connect(function()
+    local now = tick()
+
     if Config.Misc.CashPickup then
-        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local _, root = GetHumanoidAndRoot(GetCharacter())
         local folder = Workspace:FindFirstChild("OBJECTS")
         if root and folder then
             for _, item in pairs(folder:GetChildren()) do
@@ -482,10 +3011,37 @@ RunService.Heartbeat:Connect(function()
             end
         end
     end
+
+    if Config.Misc.AntiAFK and now - LastAntiAfkNudge >= 180 then
+        LastAntiAfkNudge = now
+        task.spawn(MobileCameraNudge)
+    end
+
+    if Config.Misc.LootMagnet and now - FeatureCooldowns.Loot >= 0.15 then
+        FeatureCooldowns.Loot = now
+        HandleLootMagnet()
+    end
 end)
 
-UserInputService.InputBegan:Connect(function(i,g) if not g and MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode]=true end end)
-UserInputService.InputEnded:Connect(function(i) if MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode]=false end end)
-local oldIdx; oldIdx = hookmetamethod(game, "__newindex", function(t, k, v) if Config.Misc.InfStamina and t.Name == "Stamina" and k == "Value" then return oldIdx(t, k, 100) end return oldIdx(t, k, v) end)
+UserInputService.InputBegan:Connect(function(i, g)
+    if not g then
+        local keyCode = i.KeyCode
+        if MoveKeys[keyCode] ~= nil then
+            MoveKeys[keyCode] = true
+        end
+    end
+end)
 
-print("FocusMobile Loaded")
+UserInputService.InputEnded:Connect(function(i)
+    if MoveKeys[i.KeyCode] ~= nil then MoveKeys[i.KeyCode] = false end
+end)
+
+local oldIdx;
+oldIdx = hookmetamethod(game, "__newindex", function(t, k, v)
+    if Config.Misc.InfStamina and typeof(t) == "Instance" and t.Name == "Stamina" and k == "Value" then
+        return oldIdx(t, k, 100)
+    end
+    return oldIdx(t, k, v)
+end)
+
+print("Focus Loaded! Credits too YNW")
