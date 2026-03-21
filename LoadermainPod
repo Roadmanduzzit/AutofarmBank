@@ -1,0 +1,16 @@
+local placeId = game.PlaceId
+
+local scriptByPlace = {
+    [114478751418135] = "https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/main",
+    [79546208627805]  = "https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/MainPod3",
+    [130223052405478] = "https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/MainPod",
+    [16472538603]     = "https://raw.githubusercontent.com/Roadmanduzzit/AutofarmBank/refs/heads/main/MainPodB3",
+}
+
+local url = scriptByPlace[placeId]
+
+if url then
+    loadstring(game:HttpGet(url))()
+else
+    warn("You sure this game is supported my focus?: " .. tostring(placeId))
+end
