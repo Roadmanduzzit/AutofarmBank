@@ -2350,7 +2350,7 @@ ToggleBtn.BorderSizePixel = 0
 ToggleBtn.Parent = ScreenGui
 Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 18)
 
-ToggleBtn.MouseButton1Click:Connect(function()
+ToggleBtn.Activated:Connect(function()
     MainFrame.Visible = not MainFrame.Visible
 end)
 
@@ -2436,7 +2436,7 @@ local function CreateTab(name)
     layout.Parent = page
     BindPageCanvas(page, layout)
 
-    btn.MouseButton1Click:Connect(function()
+    btn.Activated:Connect(function()
         if CurrentTab then
             CurrentTab.Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
             CurrentTab.Page.Visible = false
@@ -2475,7 +2475,7 @@ local function AddButton(page, text, cb)
     b.Parent = f
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
 
-    b.MouseButton1Click:Connect(function()
+    b.Activated:Connect(function()
         cb()
     end)
 end
@@ -2501,8 +2501,8 @@ local function AddToggle(page, text, default, cb)
 
     local b = Instance.new("TextButton")
     b.Text = ""
-    b.Size = UDim2.new(0, 62, 0, 30)
-    b.Position = UDim2.new(1, -75, 0.5, -15)
+    b.Size = UDim2.new(0, 74, 0, 36)
+    b.Position = UDim2.new(1, -87, 0.5, -18)
     b.BorderSizePixel = 0
     b.Parent = f
     Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
@@ -2516,7 +2516,7 @@ local function AddToggle(page, text, default, cb)
         end
     end
 
-    b.MouseButton1Click:Connect(function()
+    b.Activated:Connect(function()
         ApplyState(not on, true)
     end)
 
