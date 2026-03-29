@@ -1,0 +1,4821 @@
+--[[
+    Autofarm loop:
+    1) Go to sand and collect until pan is full
+    2) Go to water and pan
+    3) Shake until sand is gone
+    4) On interval, pause farm, go Merchant, sell, then resume
+
+    GUI:
+    - Draggable/moveable window
+    - Start/Stop toggle
+    - AutoSell toggle
+    - AutoLock / AutoUnlock ores toggle + separate lock/unlock ore dropdowns + custom add + save/load config
+    - Record / Stop / Delete merchant way (with white dot visualization)
+    - Fly toggle + speed slider
+    - Type custom shake timing
+    - Type merchant sell interval (minutes)
+    - Set Sand/Water position buttons
+    - Close button (stops farm + removes GUI)
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
+
+local player = Players.LocalPlayer
+
+local sharedEnv = nil
+if type(getgenv) == "function" then
+    local okEnv, env = pcall(getgenv)
+    if okEnv and type(env) == "table" then
+        sharedEnv = env
+    end
+end
+
+if sharedEnv and type(sharedEnv.FocusGoldFarmStopInstance) == "function" then
+    pcall(sharedEnv.FocusGoldFarmStopInstance, "reload")
+end
+
+local DEFAULT_SAND_POSITION = Vector3.new(-53, 13, 1)
+local DEFAULT_WATER_POSITION = Vector3.new(-83, 9, 1)
+
+local COLLECT_ARGS = { 1, false }
+local COLLECT_MIN_TIME = 2.5
+local COLLECT_MAX_TIME = 18
+local COLLECT_TICK = 0.09
+local MIN_COLLECT_CALLS = 20
+local COLLECT_STALE_LIMIT = 16
+
+local MAX_SHAKE_TIME = 12
+local MIN_CUSTOM_SHAKE_TIME = 0.25
+local MAX_CUSTOM_SHAKE_TIME = 30
+
+local MIN_FLY_SPEED = 20
+local MAX_FLY_SPEED = 220
+local DEFAULT_FLY_SPEED = 85
+
+local ORE_OPTIONS = {
+    "Gold",
+    "Silver",
+    "Copper",
+    "Iron",
+    "Ruby",
+    "Sapphire",
+    "Emerald",
+    "Diamond",
+    "Amethyst",
+    "Topaz",
+    "Opal",
+    "Quartz"
+}
+
+local MIN_MERCHANT_INTERVAL_MINUTES = 0.1
+local MAX_MERCHANT_INTERVAL_MINUTES = 120
+local DEFAULT_MERCHANT_INTERVAL_MINUTES = 5
+
+local MERCHANT_REACH_DISTANCE = 8
+local MERCHANT_MOVE_TIMEOUT = 6
+local MERCHANT_PATH_RETRIES = 6
+local MERCHANT_NUDGE_DISTANCE = 4
+local MERCHANT_MAX_CANDIDATES = 12
+local MERCHANT_WAYPOINT_TIMEOUT = 3.8
+local MERCHANT_WAYPOINT_REACH_DISTANCE = 3.4
+local MERCHANT_PROGRESS_CHECK_INTERVAL = 0.12
+local MERCHANT_PROGRESS_EPSILON = 0.55
+local MERCHANT_STUCK_SECONDS = 1.1
+local MERCHANT_APPROACH_RING_COUNT = 2
+local MERCHANT_APPROACH_RING_STEP = 4
+local MERCHANT_SLIDE_SPEED = 16
+local MIN_MERCHANT_SLIDE_SPEED = 16
+local MAX_MERCHANT_SLIDE_SPEED = 80
+local MERCHANT_SLIDE_TIMEOUT = 18
+local MERCHANT_SLIDE_REACH_DISTANCE = MERCHANT_REACH_DISTANCE
+local MERCHANT_SLIDE_LIFT_HEIGHT = 12
+local MERCHANT_SLIDE_VERTICAL_REACH = 1.8
+local MERCHANT_WAY_SAMPLE_DISTANCE = 3
+local MERCHANT_WAY_SEGMENT_REACH = 2.8
+local MERCHANT_WAY_DOT_SIZE = 0.45
+local MERCHANT_WAY_DOT_TRANSPARENCY = 0.2
+local MERCHANT_WAY_MAX_POINTS = 1200
+local MERCHANT_WAY_FOLDER_NAME = "FocusGoldFarmMerchantWayDots"
+local INTERACT_HOLD_TIME = 0.07
+local INTERACT_RELEASE_DELAY = 0.04
+local MERCHANT_SELL_DELAY_SECONDS = 2
+local AUTO_LOCK_RETRY_SECONDS = 1
+local AUTO_LOCK_TICK = 0.35
+local AUTO_LOCK_CONFIG_FILE = "focusgoldfarm_autolock_config.json"
+local BRACKET_UI_URL = "https://raw.githubusercontent.com/AlexR32/Bracket/main/BracketV32.lua"
+local FULL_CONFIG_FOLDER = "focusgoldfarm_configs"
+local FULL_CONFIG_DEFAULT_FILE = FULL_CONFIG_FOLDER .. "\\default.txt"
+
+local LOOP_DELAY = 0.2
+
+local STATE = {
+    running = true,
+    autoSell = true,
+    flyEnabled = false,
+    flySpeed = DEFAULT_FLY_SPEED,
+    flyTargetPosition = nil,
+    sandPosition = DEFAULT_SAND_POSITION,
+    waterPosition = DEFAULT_WATER_POSITION,
+    activePanName = "Detecting...",
+    customShakeTime = nil,
+    autoLockEnabled = false,
+    autoUnlockEnabled = false,
+    autoLockOreSet = {
+        gold = true,
+        ruby = true
+    },
+    autoUnlockOreSet = {},
+    oreDisplayByKey = {},
+    autoLockRetryByTool = {},
+    autoUnlockRetryByTool = {},
+    showLockOreDropdown = false,
+    showUnlockOreDropdown = false,
+    merchantWayRecording = false,
+    merchantWaypoints = {},
+    merchantWayDots = {},
+    lastMerchantWaySample = nil,
+    merchantSlideSpeed = MERCHANT_SLIDE_SPEED,
+    merchantIntervalMinutes = DEFAULT_MERCHANT_INTERVAL_MINUTES,
+    nextMerchantSellAt = 0,
+    lastMerchantSellAt = 0,
+    pausedForMerchant = false,
+    bracketScreen = nil,
+    refreshUi = nil,
+    closed = false
+}
+
+local function stopThisInstance()
+    if STATE.closed then
+        return
+    end
+
+    STATE.running = false
+    STATE.autoSell = false
+    STATE.pausedForMerchant = false
+    STATE.flyEnabled = false
+    STATE.flyTargetPosition = nil
+    STATE.showLockOreDropdown = false
+    STATE.showUnlockOreDropdown = false
+    STATE.merchantWayRecording = false
+    STATE.lastMerchantWaySample = nil
+    STATE.closed = true
+    STATE.refreshUi = nil
+
+    for index = #STATE.merchantWayDots, 1, -1 do
+        local dot = STATE.merchantWayDots[index]
+        if typeof(dot) == "Instance" and dot.Parent then
+            dot:Destroy()
+        end
+        STATE.merchantWayDots[index] = nil
+    end
+    STATE.merchantWaypoints = {}
+    local wayFolder = workspace:FindFirstChild(MERCHANT_WAY_FOLDER_NAME)
+    if wayFolder then
+        wayFolder:Destroy()
+    end
+
+    local playerGui = player:FindFirstChild("PlayerGui")
+    if playerGui then
+        local existing = playerGui:FindFirstChild("FocusGoldFarmGui")
+        if existing then
+            existing:Destroy()
+        end
+    end
+
+    local bracketScreen = STATE.bracketScreen
+    if typeof(bracketScreen) == "Instance" and bracketScreen.Parent then
+        bracketScreen:Destroy()
+    end
+    STATE.bracketScreen = nil
+
+    if sharedEnv and typeof(sharedEnv.FocusGoldFarmBracketScreen) == "Instance" then
+        local sharedScreen = sharedEnv.FocusGoldFarmBracketScreen
+        if sharedScreen.Parent then
+            sharedScreen:Destroy()
+        end
+        sharedEnv.FocusGoldFarmBracketScreen = nil
+    end
+
+    if sharedEnv and sharedEnv.FocusGoldFarmStopInstance == stopThisInstance then
+        sharedEnv.FocusGoldFarmStopInstance = nil
+    end
+end
+
+if sharedEnv then
+    sharedEnv.FocusGoldFarmStopInstance = stopThisInstance
+end
+
+local function refreshUiIfReady()
+    if STATE.refreshUi then
+        pcall(STATE.refreshUi)
+    end
+end
+
+local function getCharacter()
+    local character = player.Character or player.CharacterAdded:Wait()
+    if not character.Parent then
+        character = player.CharacterAdded:Wait()
+    end
+    return character
+end
+
+local function getHumanoidRootPart(character)
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+local function hasPanRemotes(tool)
+    if not tool or not tool:IsA("Tool") then
+        return false
+    end
+
+    local scriptsFolder = tool:FindFirstChild("Scripts")
+    if not scriptsFolder then
+        return false
+    end
+
+    local collectRemote = scriptsFolder:FindFirstChild("Collect")
+    local panRemote = scriptsFolder:FindFirstChild("Pan")
+    local shakeRemote = scriptsFolder:FindFirstChild("Shake")
+
+    return collectRemote ~= nil and panRemote ~= nil and shakeRemote ~= nil
+end
+
+local function findPanToolIn(container)
+    if not container then
+        return nil
+    end
+
+    local fallback
+    for _, child in ipairs(container:GetChildren()) do
+        if hasPanRemotes(child) then
+            if string.find(string.lower(child.Name), "pan", 1, true) then
+                return child
+            end
+            fallback = fallback or child
+        end
+    end
+
+    return fallback
+end
+
+local function getPanTool(character)
+    local timeoutAt = os.clock() + 8
+    local backpack = player:WaitForChild("Backpack")
+
+    while os.clock() < timeoutAt do
+        local characterPan = findPanToolIn(character)
+        if characterPan then
+            STATE.activePanName = characterPan.Name
+            refreshUiIfReady()
+            return characterPan
+        end
+
+        local backpackPan = findPanToolIn(backpack)
+        if backpackPan then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid:EquipTool(backpackPan)
+                task.wait(0.15)
+            end
+
+            local equippedPan = findPanToolIn(character)
+            if equippedPan then
+                STATE.activePanName = equippedPan.Name
+                refreshUiIfReady()
+                return equippedPan
+            end
+
+            STATE.activePanName = backpackPan.Name
+            refreshUiIfReady()
+            return backpackPan
+        end
+
+        task.wait(0.25)
+        character = getCharacter()
+    end
+
+    STATE.activePanName = "No pan found"
+    refreshUiIfReady()
+    return nil
+end
+
+local function getPanRemotes(panTool)
+    local scriptsFolder = panTool and panTool:FindFirstChild("Scripts")
+    if not scriptsFolder then
+        return nil, nil, nil
+    end
+
+    local collectRemote = scriptsFolder:FindFirstChild("Collect")
+    local panRemote = scriptsFolder:FindFirstChild("Pan")
+    local shakeRemote = scriptsFolder:FindFirstChild("Shake")
+    return collectRemote, panRemote, shakeRemote
+end
+
+local function getSellAllRemote()
+    return ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Shop"):WaitForChild("SellAll")
+end
+
+local function getToggleLockRemote()
+    return ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Inventory"):WaitForChild("ToggleLock")
+end
+
+local function normalizeOreName(name)
+    local cleaned = string.match(tostring(name or ""), "^%s*(.-)%s*$")
+    if not cleaned or cleaned == "" then
+        return nil, nil
+    end
+    return cleaned, string.lower(cleaned)
+end
+
+local function rememberOreDisplay(name)
+    local display, key = normalizeOreName(name)
+    if not key then
+        return nil, nil
+    end
+    if not STATE.oreDisplayByKey[key] then
+        STATE.oreDisplayByKey[key] = display
+    end
+    return STATE.oreDisplayByKey[key], key
+end
+
+for _, defaultOreName in ipairs(ORE_OPTIONS) do
+    rememberOreDisplay(defaultOreName)
+end
+
+local function getSelectedOreListForSet(oreSet)
+    local selected = {}
+    for oreKey, enabled in pairs(oreSet or {}) do
+        if enabled then
+            table.insert(selected, STATE.oreDisplayByKey[oreKey] or oreKey)
+        end
+    end
+    table.sort(selected, function(a, b)
+        return string.lower(a) < string.lower(b)
+    end)
+    return selected
+end
+
+local function formatSelectedOreSummaryForSet(oreSet)
+    local selected = getSelectedOreListForSet(oreSet)
+    if #selected == 0 then
+        return "None"
+    end
+    if #selected <= 3 then
+        return table.concat(selected, ", ")
+    end
+    return string.format("%s, %s, %s +%d", selected[1], selected[2], selected[3], #selected - 3)
+end
+
+local function getSelectedAutoLockOreList()
+    return getSelectedOreListForSet(STATE.autoLockOreSet)
+end
+
+local function getSelectedAutoUnlockOreList()
+    return getSelectedOreListForSet(STATE.autoUnlockOreSet)
+end
+
+local function formatSelectedAutoLockOreSummary()
+    return formatSelectedOreSummaryForSet(STATE.autoLockOreSet)
+end
+
+local function formatSelectedAutoUnlockOreSummary()
+    return formatSelectedOreSummaryForSet(STATE.autoUnlockOreSet)
+end
+
+local function hasSelectedOres(oreSet)
+    return next(oreSet or {}) ~= nil
+end
+
+local function hasSelectedAutoLockOres()
+    return hasSelectedOres(STATE.autoLockOreSet)
+end
+
+local function hasSelectedAutoUnlockOres()
+    return hasSelectedOres(STATE.autoUnlockOreSet)
+end
+
+local function toolNameMatchesOreSet(toolName, oreSet)
+    local normalizedName = string.lower(tostring(toolName or ""))
+    for oreKey in pairs(oreSet or {}) do
+        if normalizedName:find(oreKey, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function forEachInventoryTool(callback)
+    local seen = {}
+
+    local function scanContainer(container)
+        if not container then
+            return
+        end
+
+        for _, item in ipairs(container:GetDescendants()) do
+            if (item:IsA("Tool") or item:IsA("HopperBin")) and not seen[item] then
+                seen[item] = true
+                callback(item)
+            end
+        end
+    end
+
+    scanContainer(player:FindFirstChild("Backpack"))
+    scanContainer(player:FindFirstChild("BackpackTwo"))
+    scanContainer(player.Character)
+end
+
+local function isLikelyOreItem(tool)
+    if not tool then
+        return false
+    end
+
+    local lowerName = string.lower(tool.Name or "")
+    if lowerName == "" then
+        return false
+    end
+
+    if tool:FindFirstChild("Scripts") then
+        return false
+    end
+
+    if lowerName:find("pan", 1, true)
+        or lowerName:find("shovel", 1, true)
+        or lowerName:find("kit", 1, true)
+        or lowerName:find("collection", 1, true)
+        or lowerName:find("ornament", 1, true)
+        or lowerName:find("crate", 1, true)
+        or lowerName:find("map", 1, true)
+    then
+        return false
+    end
+
+    return true
+end
+
+local function getAvailableOreOptions()
+    local options = {}
+    local seen = {}
+
+    local function addOption(name)
+        local display, key = rememberOreDisplay(name)
+        if display and not seen[key] then
+            seen[key] = true
+            table.insert(options, display)
+        end
+    end
+
+    for _, defaultOreName in ipairs(ORE_OPTIONS) do
+        addOption(defaultOreName)
+    end
+
+    for _, oreDisplay in pairs(STATE.oreDisplayByKey) do
+        addOption(oreDisplay)
+    end
+
+    forEachInventoryTool(function(tool)
+        if isLikelyOreItem(tool) then
+            addOption(tool.Name)
+        end
+    end)
+
+    table.sort(options, function(a, b)
+        return string.lower(a) < string.lower(b)
+    end)
+
+    return options
+end
+
+local function addCustomOreName(name, preferredMode)
+    local display, key = rememberOreDisplay(name)
+    if not key then
+        return false, "Type an ore name first"
+    end
+
+    if preferredMode == "unlock" then
+        STATE.autoUnlockOreSet[key] = true
+    else
+        STATE.autoLockOreSet[key] = true
+    end
+    return true, display
+end
+
+local function buildAutoLockConfigData()
+    local lockOres = getSelectedAutoLockOreList()
+    local unlockOres = getSelectedAutoUnlockOreList()
+    return {
+        enabled = STATE.autoLockEnabled,
+        unlock_enabled = STATE.autoUnlockEnabled,
+        ores = lockOres,
+        lock_ores = lockOres,
+        unlock_ores = unlockOres
+    }
+end
+
+local function applyAutoLockConfigData(configData)
+    if type(configData) ~= "table" then
+        return false, "Invalid config data"
+    end
+
+    local lockSet = {}
+    local unlockSet = {}
+    local rawLockOres = configData.lock_ores
+    if type(rawLockOres) ~= "table" then
+        rawLockOres = configData.ores
+    end
+    if type(rawLockOres) == "table" then
+        for _, oreName in ipairs(rawLockOres) do
+            local _, oreKey = rememberOreDisplay(oreName)
+            if oreKey then
+                lockSet[oreKey] = true
+            end
+        end
+    end
+    if type(configData.unlock_ores) == "table" then
+        for _, oreName in ipairs(configData.unlock_ores) do
+            local _, oreKey = rememberOreDisplay(oreName)
+            if oreKey then
+                unlockSet[oreKey] = true
+            end
+        end
+    end
+
+    local lockEnabled = configData.enabled == true
+    local unlockEnabled = configData.unlock_enabled == true
+    if lockEnabled and unlockEnabled then
+        unlockEnabled = false
+    end
+
+    STATE.autoLockOreSet = lockSet
+    STATE.autoUnlockOreSet = unlockSet
+    STATE.autoLockEnabled = lockEnabled
+    STATE.autoUnlockEnabled = unlockEnabled
+    STATE.autoLockRetryByTool = {}
+    STATE.autoUnlockRetryByTool = {}
+    return true
+end
+
+local function saveAutoLockConfig()
+    if type(writefile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local encoded = HttpService:JSONEncode(buildAutoLockConfigData())
+    local ok, err = pcall(function()
+        writefile(AUTO_LOCK_CONFIG_FILE, encoded)
+    end)
+
+    if not ok then
+        return false, tostring(err)
+    end
+
+    return true, AUTO_LOCK_CONFIG_FILE
+end
+
+local function loadAutoLockConfig()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    if not isfile(AUTO_LOCK_CONFIG_FILE) then
+        return false, "No saved config"
+    end
+
+    local okRead, raw = pcall(function()
+        return readfile(AUTO_LOCK_CONFIG_FILE)
+    end)
+    if not okRead then
+        return false, tostring(raw)
+    end
+
+    local okDecode, decoded = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not okDecode then
+        return false, "Config decode failed"
+    end
+
+    local applied, applyErr = applyAutoLockConfigData(decoded)
+    if not applied then
+        return false, applyErr or "Config apply failed"
+    end
+
+    return true, AUTO_LOCK_CONFIG_FILE
+end
+
+local function sanitizeConfigName(name)
+    local cleaned = string.match(tostring(name or ""), "^%s*(.-)%s*$") or ""
+    cleaned = string.gsub(cleaned, "[\\/:*?\"<>|]", "_")
+    cleaned = string.gsub(cleaned, "%s+", "_")
+    if cleaned == "" then
+        cleaned = "default"
+    end
+    return cleaned
+end
+
+local function ensureFullConfigFolder()
+    if type(isfolder) ~= "function" or type(makefolder) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ok, err = pcall(function()
+        if not isfolder(FULL_CONFIG_FOLDER) then
+            makefolder(FULL_CONFIG_FOLDER)
+        end
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+
+    if type(isfile) == "function" and type(writefile) == "function" then
+        pcall(function()
+            if not isfile(FULL_CONFIG_DEFAULT_FILE) then
+                writefile(FULL_CONFIG_DEFAULT_FILE, "")
+            end
+        end)
+    end
+
+    return true
+end
+
+local function getFullConfigPath(name)
+    return FULL_CONFIG_FOLDER .. "\\" .. sanitizeConfigName(name) .. ".json"
+end
+
+local function vector3ToConfigTable(vector)
+    if typeof(vector) ~= "Vector3" then
+        return nil
+    end
+    return {
+        x = vector.X,
+        y = vector.Y,
+        z = vector.Z
+    }
+end
+
+local function configTableToVector3(raw)
+    if type(raw) ~= "table" then
+        return nil
+    end
+    local x = tonumber(raw.x or raw[1])
+    local y = tonumber(raw.y or raw[2])
+    local z = tonumber(raw.z or raw[3])
+    if not x or not y or not z then
+        return nil
+    end
+    return Vector3.new(x, y, z)
+end
+
+local function getKnownOreDisplayList()
+    local names = {}
+    local seen = {}
+    for _, display in pairs(STATE.oreDisplayByKey) do
+        local text = tostring(display or "")
+        if text ~= "" then
+            local lower = string.lower(text)
+            if not seen[lower] then
+                seen[lower] = true
+                names[#names + 1] = text
+            end
+        end
+    end
+    table.sort(names, function(a, b)
+        return string.lower(a) < string.lower(b)
+    end)
+    return names
+end
+
+local function clearMerchantWayDotsForConfig()
+    for index = #STATE.merchantWayDots, 1, -1 do
+        local dot = STATE.merchantWayDots[index]
+        if typeof(dot) == "Instance" and dot.Parent then
+            dot:Destroy()
+        end
+        STATE.merchantWayDots[index] = nil
+    end
+
+    local folder = workspace:FindFirstChild(MERCHANT_WAY_FOLDER_NAME)
+    if folder then
+        folder:Destroy()
+    end
+end
+
+local function ensureMerchantWayDotsFolderForConfig()
+    local folder = workspace:FindFirstChild(MERCHANT_WAY_FOLDER_NAME)
+    if folder then
+        return folder
+    end
+
+    folder = Instance.new("Folder")
+    folder.Name = MERCHANT_WAY_FOLDER_NAME
+    folder.Parent = workspace
+    return folder
+end
+
+local function applyMerchantWaypointsFromConfig(rawWaypoints)
+    clearMerchantWayDotsForConfig()
+    STATE.merchantWaypoints = {}
+    STATE.lastMerchantWaySample = nil
+    STATE.merchantWayRecording = false
+
+    if type(rawWaypoints) ~= "table" then
+        return
+    end
+
+    local folder = nil
+    for _, waypointRaw in ipairs(rawWaypoints) do
+        if #STATE.merchantWaypoints >= MERCHANT_WAY_MAX_POINTS then
+            break
+        end
+
+        local point = configTableToVector3(waypointRaw)
+        if point then
+            STATE.merchantWaypoints[#STATE.merchantWaypoints + 1] = point
+
+            if not folder then
+                folder = ensureMerchantWayDotsFolderForConfig()
+            end
+
+            local dot = Instance.new("Part")
+            dot.Name = "MerchantWayDot"
+            dot.Shape = Enum.PartType.Ball
+            dot.Size = Vector3.new(MERCHANT_WAY_DOT_SIZE, MERCHANT_WAY_DOT_SIZE, MERCHANT_WAY_DOT_SIZE)
+            dot.Material = Enum.Material.Neon
+            dot.Color = Color3.new(1, 1, 1)
+            dot.Transparency = MERCHANT_WAY_DOT_TRANSPARENCY
+            dot.Anchored = true
+            dot.CanCollide = false
+            dot.CanTouch = false
+            dot.CanQuery = false
+            dot.CastShadow = false
+            dot.CFrame = CFrame.new(point)
+            dot.Parent = folder
+            STATE.merchantWayDots[#STATE.merchantWayDots + 1] = dot
+        end
+    end
+
+    if #STATE.merchantWaypoints == 0 then
+        clearMerchantWayDotsForConfig()
+    end
+end
+
+local function buildFullConfigData()
+    local lockData = buildAutoLockConfigData()
+    local merchantWaypoints = {}
+    local merchantInterval = tonumber(STATE.merchantIntervalMinutes) or DEFAULT_MERCHANT_INTERVAL_MINUTES
+    if merchantInterval < MIN_MERCHANT_INTERVAL_MINUTES then
+        merchantInterval = MIN_MERCHANT_INTERVAL_MINUTES
+    elseif merchantInterval > MAX_MERCHANT_INTERVAL_MINUTES then
+        merchantInterval = MAX_MERCHANT_INTERVAL_MINUTES
+    end
+
+    local merchantSpeed = tonumber(STATE.merchantSlideSpeed) or MERCHANT_SLIDE_SPEED
+    if merchantSpeed < MIN_MERCHANT_SLIDE_SPEED then
+        merchantSpeed = MIN_MERCHANT_SLIDE_SPEED
+    elseif merchantSpeed > MAX_MERCHANT_SLIDE_SPEED then
+        merchantSpeed = MAX_MERCHANT_SLIDE_SPEED
+    end
+
+    for _, waypoint in ipairs(STATE.merchantWaypoints) do
+        local encoded = vector3ToConfigTable(waypoint)
+        if encoded then
+            merchantWaypoints[#merchantWaypoints + 1] = encoded
+        end
+    end
+
+    return {
+        version = 1,
+        auto_farm = STATE.running,
+        auto_sell = STATE.autoSell,
+        fly_enabled = STATE.flyEnabled,
+        fly_speed = STATE.flySpeed,
+        sand_position = vector3ToConfigTable(STATE.sandPosition),
+        water_position = vector3ToConfigTable(STATE.waterPosition),
+        custom_shake_time = STATE.customShakeTime,
+        merchant_interval_minutes = merchantInterval,
+        merchant_slide_speed = merchantSpeed,
+        ore_names = getKnownOreDisplayList(),
+        auto_lock = lockData,
+        merchant_waypoints = merchantWaypoints
+    }
+end
+
+local function applyFullConfigData(configData)
+    if type(configData) ~= "table" then
+        return false, "Invalid config data"
+    end
+
+    if type(configData.ore_names) == "table" then
+        for _, oreName in ipairs(configData.ore_names) do
+            rememberOreDisplay(oreName)
+        end
+    end
+
+    local lockData = configData.auto_lock
+    if type(lockData) ~= "table" then
+        lockData = {
+            enabled = configData.auto_lock_enabled == true or configData.enabled == true,
+            unlock_enabled = configData.auto_unlock_enabled == true or configData.unlock_enabled == true,
+            lock_ores = configData.lock_ores or configData.ores,
+            unlock_ores = configData.unlock_ores
+        }
+    end
+    local lockApplied, lockErr = applyAutoLockConfigData(lockData)
+    if not lockApplied then
+        return false, lockErr or "Failed to apply lock settings"
+    end
+
+    if type(configData.auto_sell) == "boolean" then
+        STATE.autoSell = configData.auto_sell
+    end
+
+    if type(configData.auto_farm) == "boolean" then
+        STATE.running = configData.auto_farm
+    elseif type(configData.running) == "boolean" then
+        STATE.running = configData.running
+    end
+
+    if type(configData.fly_enabled) == "boolean" then
+        STATE.flyEnabled = configData.fly_enabled
+        if not STATE.flyEnabled then
+            STATE.flyTargetPosition = nil
+        end
+    end
+
+    local flySpeed = tonumber(configData.fly_speed)
+    if flySpeed then
+        if flySpeed < MIN_FLY_SPEED then
+            flySpeed = MIN_FLY_SPEED
+        elseif flySpeed > MAX_FLY_SPEED then
+            flySpeed = MAX_FLY_SPEED
+        end
+        STATE.flySpeed = math.floor(flySpeed + 0.5)
+    end
+
+    local sandPosition = configTableToVector3(configData.sand_position)
+    if sandPosition then
+        STATE.sandPosition = sandPosition
+    end
+
+    local waterPosition = configTableToVector3(configData.water_position)
+    if waterPosition then
+        STATE.waterPosition = waterPosition
+    end
+
+    local shakeTime = tonumber(configData.custom_shake_time)
+    if shakeTime then
+        if shakeTime < MIN_CUSTOM_SHAKE_TIME then
+            shakeTime = MIN_CUSTOM_SHAKE_TIME
+        elseif shakeTime > MAX_CUSTOM_SHAKE_TIME then
+            shakeTime = MAX_CUSTOM_SHAKE_TIME
+        end
+        STATE.customShakeTime = shakeTime
+    elseif configData.custom_shake_time == nil then
+        STATE.customShakeTime = nil
+    end
+
+    local merchantInterval = tonumber(configData.merchant_interval_minutes)
+    if merchantInterval then
+        if merchantInterval < MIN_MERCHANT_INTERVAL_MINUTES then
+            merchantInterval = MIN_MERCHANT_INTERVAL_MINUTES
+        elseif merchantInterval > MAX_MERCHANT_INTERVAL_MINUTES then
+            merchantInterval = MAX_MERCHANT_INTERVAL_MINUTES
+        end
+        STATE.merchantIntervalMinutes = merchantInterval
+    end
+
+    local merchantSpeed = tonumber(configData.merchant_slide_speed)
+    if merchantSpeed then
+        if merchantSpeed < MIN_MERCHANT_SLIDE_SPEED then
+            merchantSpeed = MIN_MERCHANT_SLIDE_SPEED
+        elseif merchantSpeed > MAX_MERCHANT_SLIDE_SPEED then
+            merchantSpeed = MAX_MERCHANT_SLIDE_SPEED
+        end
+        STATE.merchantSlideSpeed = math.floor(merchantSpeed + 0.5)
+    end
+
+    applyMerchantWaypointsFromConfig(configData.merchant_waypoints)
+
+    STATE.pausedForMerchant = false
+    STATE.nextMerchantSellAt = 0
+    STATE.lastMerchantSellAt = 0
+
+    return true
+end
+
+local function listFullConfigNames()
+    if type(listfiles) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ready, readyErr = ensureFullConfigFolder()
+    if not ready then
+        return false, readyErr
+    end
+
+    local ok, filesOrErr = pcall(function()
+        return listfiles(FULL_CONFIG_FOLDER)
+    end)
+    if not ok then
+        return false, tostring(filesOrErr)
+    end
+
+    local names = {}
+    for _, filePath in ipairs(filesOrErr or {}) do
+        local normalized = string.gsub(tostring(filePath), "/", "\\")
+        local fileName = string.match(normalized, "([^\\]+)$")
+        local configName = fileName and string.match(fileName, "^(.-)%.json$")
+        if configName and configName ~= "" then
+            names[#names + 1] = configName
+        end
+    end
+
+    table.sort(names, function(a, b)
+        return string.lower(a) < string.lower(b)
+    end)
+    return true, names
+end
+
+local function getDefaultFullConfigName()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ready, readyErr = ensureFullConfigFolder()
+    if not ready then
+        return false, readyErr
+    end
+
+    if not isfile(FULL_CONFIG_DEFAULT_FILE) then
+        return true, nil
+    end
+
+    local ok, raw = pcall(function()
+        return readfile(FULL_CONFIG_DEFAULT_FILE)
+    end)
+    if not ok then
+        return false, tostring(raw)
+    end
+
+    local cleaned = string.match(tostring(raw or ""), "^%s*(.-)%s*$")
+    if not cleaned or cleaned == "" then
+        return true, nil
+    end
+    return true, sanitizeConfigName(cleaned)
+end
+
+local function setDefaultFullConfigName(name)
+    if type(writefile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ready, readyErr = ensureFullConfigFolder()
+    if not ready then
+        return false, readyErr
+    end
+
+    local cleaned = name and sanitizeConfigName(name) or ""
+    local ok, err = pcall(function()
+        writefile(FULL_CONFIG_DEFAULT_FILE, cleaned)
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+    return true
+end
+
+local function saveFullConfig(name)
+    if type(writefile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ready, readyErr = ensureFullConfigFolder()
+    if not ready then
+        return false, readyErr
+    end
+
+    local cleanedName = sanitizeConfigName(name)
+    local encoded = HttpService:JSONEncode(buildFullConfigData())
+    local path = getFullConfigPath(cleanedName)
+
+    local ok, err = pcall(function()
+        writefile(path, encoded)
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, cleanedName
+end
+
+local function loadFullConfig(name)
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ready, readyErr = ensureFullConfigFolder()
+    if not ready then
+        return false, readyErr
+    end
+
+    local cleanedName = sanitizeConfigName(name)
+    local path = getFullConfigPath(cleanedName)
+    if not isfile(path) then
+        return false, "Config not found"
+    end
+
+    local okRead, raw = pcall(function()
+        return readfile(path)
+    end)
+    if not okRead then
+        return false, tostring(raw)
+    end
+
+    local okDecode, decoded = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not okDecode then
+        return false, "Config decode failed"
+    end
+
+    local applied, applyErr = applyFullConfigData(decoded)
+    if not applied then
+        return false, applyErr or "Config apply failed"
+    end
+
+    return true, cleanedName
+end
+
+local function deleteFullConfig(name)
+    if type(delfile) ~= "function" or type(isfile) ~= "function" then
+        return false, "File API not available"
+    end
+
+    local ready, readyErr = ensureFullConfigFolder()
+    if not ready then
+        return false, readyErr
+    end
+
+    local cleanedName = sanitizeConfigName(name)
+    local path = getFullConfigPath(cleanedName)
+    if not isfile(path) then
+        return false, "Config not found"
+    end
+
+    local ok, err = pcall(function()
+        delfile(path)
+    end)
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, cleanedName
+end
+
+local function runAutoLockPass(toggleLockRemote)
+    if not STATE.autoLockEnabled or not hasSelectedAutoLockOres() then
+        return
+    end
+
+    local now = os.clock()
+    for trackedTool in pairs(STATE.autoLockRetryByTool) do
+        if typeof(trackedTool) ~= "Instance" or trackedTool.Parent == nil then
+            STATE.autoLockRetryByTool[trackedTool] = nil
+        end
+    end
+
+    forEachInventoryTool(function(tool)
+        if not tool:GetAttribute("Locked")
+            and not tool:GetAttribute("AutoLocked")
+            and toolNameMatchesOreSet(tool.Name, STATE.autoLockOreSet)
+        then
+            local retryAt = STATE.autoLockRetryByTool[tool] or 0
+            if now >= retryAt then
+                STATE.autoLockRetryByTool[tool] = now + AUTO_LOCK_RETRY_SECONDS
+                pcall(function()
+                    toggleLockRemote:FireServer(tool)
+                end)
+            end
+        end
+    end)
+end
+
+local function runAutoUnlockPass(toggleLockRemote)
+    if not STATE.autoUnlockEnabled or not hasSelectedAutoUnlockOres() then
+        return
+    end
+
+    local now = os.clock()
+    for trackedTool in pairs(STATE.autoUnlockRetryByTool) do
+        if typeof(trackedTool) ~= "Instance" or trackedTool.Parent == nil then
+            STATE.autoUnlockRetryByTool[trackedTool] = nil
+        end
+    end
+
+    forEachInventoryTool(function(tool)
+        if tool:GetAttribute("Locked")
+            and toolNameMatchesOreSet(tool.Name, STATE.autoUnlockOreSet)
+        then
+            local retryAt = STATE.autoUnlockRetryByTool[tool] or 0
+            if now >= retryAt then
+                STATE.autoUnlockRetryByTool[tool] = now + AUTO_LOCK_RETRY_SECONDS
+                pcall(function()
+                    toggleLockRemote:FireServer(tool)
+                end)
+            end
+        end
+    end)
+end
+
+local function getMerchantIntervalMinutes()
+    local interval = tonumber(STATE.merchantIntervalMinutes) or DEFAULT_MERCHANT_INTERVAL_MINUTES
+    if interval < MIN_MERCHANT_INTERVAL_MINUTES then
+        interval = MIN_MERCHANT_INTERVAL_MINUTES
+    elseif interval > MAX_MERCHANT_INTERVAL_MINUTES then
+        interval = MAX_MERCHANT_INTERVAL_MINUTES
+    end
+    return interval
+end
+
+local function getMerchantIntervalSeconds()
+    return getMerchantIntervalMinutes() * 60
+end
+
+local function getMerchantSlideSpeed()
+    local speed = tonumber(STATE.merchantSlideSpeed) or MERCHANT_SLIDE_SPEED
+    if speed < MIN_MERCHANT_SLIDE_SPEED then
+        speed = MIN_MERCHANT_SLIDE_SPEED
+    elseif speed > MAX_MERCHANT_SLIDE_SPEED then
+        speed = MAX_MERCHANT_SLIDE_SPEED
+    end
+    return speed
+end
+
+local function formatMerchantInterval()
+    return string.format("%.2f min", getMerchantIntervalMinutes())
+end
+
+local NOW_TIME_SOURCE = "os.clock"
+local NOW_TIME_READER = os.clock
+do
+    local okServer, serverNow = pcall(function()
+        return workspace:GetServerTimeNow()
+    end)
+    if okServer and type(serverNow) == "number" then
+        NOW_TIME_SOURCE = "workspace:GetServerTimeNow"
+        NOW_TIME_READER = function()
+            return workspace:GetServerTimeNow()
+        end
+    elseif type(time) == "function" then
+        local okTime, timeNow = pcall(function()
+            return time()
+        end)
+        if okTime and type(timeNow) == "number" then
+            NOW_TIME_SOURCE = "time"
+            NOW_TIME_READER = function()
+                return time()
+            end
+        end
+    end
+end
+
+local LAST_VALID_TIME = nil
+local LAST_VALID_TIME_MONO = os.clock()
+do
+    local okInitial, initialNow = pcall(function()
+        return NOW_TIME_READER()
+    end)
+    if okInitial and type(initialNow) == "number" then
+        LAST_VALID_TIME = initialNow
+        LAST_VALID_TIME_MONO = os.clock()
+    else
+        LAST_VALID_TIME = LAST_VALID_TIME_MONO
+    end
+end
+
+local function getNowTime()
+    local monoNow = os.clock()
+    local ok, current = pcall(function()
+        return NOW_TIME_READER()
+    end)
+    if ok and type(current) == "number" then
+        LAST_VALID_TIME = current
+        LAST_VALID_TIME_MONO = monoNow
+        return current
+    end
+
+    if type(LAST_VALID_TIME) == "number" then
+        local drift = monoNow - LAST_VALID_TIME_MONO
+        if drift < 0 then
+            drift = 0
+        end
+        return LAST_VALID_TIME + drift
+    end
+
+    return monoNow
+end
+
+local function scheduleNextMerchantSell(anchorTime)
+    local baseTime = anchorTime
+    if type(baseTime) ~= "number" then
+        baseTime = getNowTime()
+    end
+    STATE.nextMerchantSellAt = baseTime + getMerchantIntervalSeconds()
+end
+
+local function getMerchantSafetyCooldownSeconds()
+    local cooldown = getMerchantIntervalSeconds() * 0.9
+    if cooldown < 2 then
+        cooldown = 2
+    end
+    return cooldown
+end
+
+local function shouldRunMerchantSellNow()
+    local now = getNowTime()
+
+    if type(STATE.nextMerchantSellAt) ~= "number" or STATE.nextMerchantSellAt <= 0 then
+        scheduleNextMerchantSell(now)
+        return false
+    end
+
+    if type(STATE.lastMerchantSellAt) == "number" and STATE.lastMerchantSellAt > 0 then
+        local minAllowedAt = STATE.lastMerchantSellAt + getMerchantSafetyCooldownSeconds()
+        if now < minAllowedAt then
+            if STATE.nextMerchantSellAt < minAllowedAt then
+                STATE.nextMerchantSellAt = minAllowedAt
+            end
+            return false
+        end
+    end
+
+    return now >= STATE.nextMerchantSellAt
+end
+
+local function getInteractionPositionFromContainer(container)
+    if not container then
+        return nil
+    end
+
+    local prompt = container:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Parent and prompt.Parent:IsA("BasePart") then
+        return prompt.Parent.Position
+    end
+
+    local part = container:FindFirstChildWhichIsA("BasePart", true)
+    if part then
+        return part.Position
+    end
+
+    return nil
+end
+
+local function getObjectPosition(obj)
+    if not obj then
+        return nil
+    end
+
+    if obj:IsA("BasePart") then
+        return obj.Position
+    end
+
+    if obj:IsA("Attachment") then
+        return obj.WorldPosition
+    end
+
+    if obj:IsA("Model") then
+        if obj.PrimaryPart then
+            return obj.PrimaryPart.Position
+        end
+        return getInteractionPositionFromContainer(obj)
+    end
+
+    if obj:IsA("ProximityPrompt") and obj.Parent and obj.Parent:IsA("BasePart") then
+        return obj.Parent.Position
+    end
+
+    if obj:IsA("Folder") or obj:IsA("Configuration") then
+        return getInteractionPositionFromContainer(obj)
+    end
+
+    return nil
+end
+
+local function getMerchantRoot(obj)
+    local current = obj
+
+    while current and current ~= workspace do
+        if string.find(string.lower(current.Name), "merchant", 1, true) then
+            return current
+        end
+        current = current.Parent
+    end
+
+    return nil
+end
+
+local function addMerchantCandidate(candidateMap, key, candidateObject, pos, hasPrompt, fromPosition)
+    if not key or not candidateObject or not pos then
+        return
+    end
+
+    local distance = (fromPosition - pos).Magnitude
+    local existing = candidateMap[key]
+    if existing then
+        if distance < existing.distance then
+            existing.position = pos
+            existing.distance = distance
+            existing.object = candidateObject
+        end
+        existing.hasPrompt = existing.hasPrompt or hasPrompt == true
+        return
+    end
+
+    candidateMap[key] = {
+        object = candidateObject,
+        position = pos,
+        distance = distance,
+        hasPrompt = hasPrompt == true
+    }
+end
+
+local function resolveMerchantCandidateFromPrompt(prompt)
+    if not prompt or not prompt.Parent or not prompt.Parent:IsA("BasePart") then
+        return nil, nil, nil
+    end
+
+    local root = getMerchantRoot(prompt)
+    if not root then
+        return nil, nil, nil
+    end
+
+    local candidateKey = root
+    local candidateObject = root
+
+    if root:IsA("Folder") or root:IsA("Configuration") then
+        local ownerModel = prompt:FindFirstAncestorOfClass("Model")
+        if ownerModel and ownerModel ~= root then
+            candidateKey = ownerModel
+            candidateObject = ownerModel
+        else
+            candidateKey = prompt.Parent
+            candidateObject = prompt.Parent
+        end
+    end
+
+    return candidateKey, candidateObject, prompt.Parent.Position
+end
+
+local function findMerchantCandidates(fromPosition)
+    local candidateMap = {}
+
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local candidateKey, candidateObject, promptPos = resolveMerchantCandidateFromPrompt(prompt)
+            if candidateKey and candidateObject and promptPos then
+                addMerchantCandidate(candidateMap, candidateKey, candidateObject, promptPos, true, fromPosition)
+            end
+        end
+    end
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if string.find(string.lower(obj.Name), "merchant", 1, true) then
+            local root = getMerchantRoot(obj) or obj
+            local pos = getObjectPosition(root) or getObjectPosition(obj)
+            if pos then
+                local hasPrompt = root:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
+                addMerchantCandidate(candidateMap, root, root, pos, hasPrompt, fromPosition)
+            end
+        end
+    end
+
+    local candidates = {}
+    for _, candidate in pairs(candidateMap) do
+        table.insert(candidates, candidate)
+    end
+
+    table.sort(candidates, function(a, b)
+        if a.distance ~= b.distance then
+            return a.distance < b.distance
+        end
+        if a.hasPrompt ~= b.hasPrompt then
+            return a.hasPrompt
+        end
+        return false
+    end)
+
+    return candidates
+end
+
+local function createMerchantPath()
+    return PathfindingService:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        AgentCanClimb = true,
+        WaypointSpacing = 3
+    })
+end
+
+local function getPathLengthFromWaypoints(startPosition, waypoints, fallbackGoal)
+    local totalLength = 0
+    local previous = startPosition
+
+    for _, waypoint in ipairs(waypoints) do
+        totalLength = totalLength + (waypoint.Position - previous).Magnitude
+        previous = waypoint.Position
+    end
+
+    if totalLength <= 0 and fallbackGoal then
+        totalLength = (fallbackGoal - startPosition).Magnitude
+    end
+
+    return totalLength
+end
+
+local function estimateMerchantPathCost(fromPosition, targetPosition)
+    local path = createMerchantPath()
+
+    local okCompute = pcall(function()
+        path:ComputeAsync(fromPosition, targetPosition)
+    end)
+
+    if not okCompute or path.Status ~= Enum.PathStatus.Success then
+        return (fromPosition - targetPosition).Magnitude + 100000, false
+    end
+
+    local waypoints = path:GetWaypoints()
+    local totalLength = getPathLengthFromWaypoints(fromPosition, waypoints, targetPosition)
+
+    return totalLength, true
+end
+
+local function chooseBestMerchantCandidate(candidates, fromPosition)
+    local bestCandidate = nil
+    local bestPosition = nil
+    local bestScore = math.huge
+
+    local maxCandidates = math.min(#candidates, MERCHANT_MAX_CANDIDATES)
+    for index = 1, maxCandidates do
+        local candidate = candidates[index]
+        local targetPos = getInteractionPositionFromContainer(candidate.object) or getObjectPosition(candidate.object) or candidate.position
+        if targetPos then
+            local score = (fromPosition - targetPos).Magnitude
+            if candidate.hasPrompt then
+                score = score - 1.5
+            end
+
+            if score < bestScore then
+                bestScore = score
+                bestCandidate = candidate
+                bestPosition = targetPos
+            end
+        end
+    end
+
+    return bestCandidate, bestPosition
+end
+
+local function slideToPosition(targetPosition, speed, timeoutSeconds, reachDistance)
+    local character = getCharacter()
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not hrp then
+        return false, "Character not ready"
+    end
+
+    local moveSpeed = speed or MERCHANT_SLIDE_SPEED
+    if moveSpeed <= 0 then
+        moveSpeed = MERCHANT_SLIDE_SPEED
+    end
+
+    local timeoutAt = os.clock() + (timeoutSeconds or MERCHANT_SLIDE_TIMEOUT)
+    local reach = reachDistance or MERCHANT_SLIDE_REACH_DISTANCE
+
+    while os.clock() < timeoutAt do
+        local currentPos = hrp.Position
+        local toTarget = targetPosition - currentPos
+        local distance = toTarget.Magnitude
+
+        if distance <= reach then
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            return true, "Reached merchant"
+        end
+
+        if humanoid and humanoid.Sit then
+            humanoid.Sit = false
+        end
+
+        local dt = RunService.Heartbeat:Wait()
+        local step = moveSpeed * dt
+        if step > distance then
+            step = distance
+        end
+
+        local nextPos = currentPos
+        if distance > 0.0001 then
+            nextPos = currentPos + (toTarget.Unit * step)
+        end
+
+        hrp.CFrame = CFrame.new(nextPos)
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    end
+
+    if (hrp.Position - targetPosition).Magnitude <= reach then
+        return true, "Reached merchant"
+    end
+
+    return false, "Slide timeout"
+end
+
+local function computeSlideTimeout(fromPosition, toPosition, speed)
+    local travelSpeed = speed or MERCHANT_SLIDE_SPEED
+    if travelSpeed <= 0 then
+        travelSpeed = MERCHANT_SLIDE_SPEED
+    end
+
+    local distance = (toPosition - fromPosition).Magnitude
+    local timeout = (distance / travelSpeed) + 2.5
+    if timeout < MERCHANT_SLIDE_TIMEOUT then
+        timeout = MERCHANT_SLIDE_TIMEOUT
+    end
+    return timeout
+end
+
+local function slideToPositionWithLift(targetPosition, speed, reachDistance, liftHeight)
+    local character = getCharacter()
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return false, "Character not ready"
+    end
+
+    local travelSpeed = speed or MERCHANT_SLIDE_SPEED
+    if travelSpeed <= 0 then
+        travelSpeed = MERCHANT_SLIDE_SPEED
+    end
+
+    local reach = reachDistance or MERCHANT_SLIDE_REACH_DISTANCE
+    local lift = liftHeight or MERCHANT_SLIDE_LIFT_HEIGHT
+    if lift < 0 then
+        lift = 0
+    end
+
+    local function runSegment(segmentTarget, segmentReach)
+        local timeout = computeSlideTimeout(hrp.Position, segmentTarget, travelSpeed)
+        return slideToPosition(segmentTarget, travelSpeed, timeout, segmentReach or reach)
+    end
+
+    local startPosition = hrp.Position
+    local horizontalDistance = (Vector3.new(targetPosition.X, 0, targetPosition.Z) - Vector3.new(startPosition.X, 0, startPosition.Z)).Magnitude
+    if horizontalDistance <= reach then
+        local directTimeout = computeSlideTimeout(startPosition, targetPosition, travelSpeed)
+        return slideToPosition(targetPosition, travelSpeed, directTimeout, reach)
+    end
+
+    local cruiseY = math.max(startPosition.Y, targetPosition.Y) + lift
+
+    local liftPosition = Vector3.new(startPosition.X, cruiseY, startPosition.Z)
+    if math.abs(cruiseY - startPosition.Y) > MERCHANT_SLIDE_VERTICAL_REACH then
+        local lifted, liftMsg = runSegment(liftPosition, MERCHANT_SLIDE_VERTICAL_REACH)
+        if not lifted then
+            return false, "Lift failed (" .. tostring(liftMsg) .. ")"
+        end
+    end
+
+    local cruisePosition = Vector3.new(targetPosition.X, cruiseY, targetPosition.Z)
+    local cruised, cruiseMsg = runSegment(cruisePosition, math.max(reach, 2.2))
+    if not cruised then
+        return false, "Cruise failed (" .. tostring(cruiseMsg) .. ")"
+    end
+
+    local descended, descendMsg = runSegment(targetPosition, reach)
+    if not descended then
+        return false, "Descend failed (" .. tostring(descendMsg) .. ")"
+    end
+
+    return true, "Reached merchant"
+end
+
+local function moveToWithProgress(humanoid, hrp, destination, timeoutSeconds, reachDistance)
+    local timeout = timeoutSeconds or MERCHANT_MOVE_TIMEOUT
+    local arriveDistance = reachDistance or MERCHANT_REACH_DISTANCE
+
+    humanoid:MoveTo(destination)
+
+    local startTime = os.clock()
+    local lastProgressAt = startTime
+    local lastPosition = hrp.Position
+    local refreshSent = false
+
+    while (os.clock() - startTime) < timeout do
+        local currentPos = hrp.Position
+        if (currentPos - destination).Magnitude <= arriveDistance then
+            return true, "Reached"
+        end
+
+        local moved = (currentPos - lastPosition).Magnitude
+        if moved >= MERCHANT_PROGRESS_EPSILON then
+            lastPosition = currentPos
+            lastProgressAt = os.clock()
+        else
+            local stalledFor = os.clock() - lastProgressAt
+            if stalledFor >= MERCHANT_STUCK_SECONDS then
+                if not refreshSent then
+                    refreshSent = true
+                    lastProgressAt = os.clock()
+                    humanoid.Jump = true
+                    humanoid:MoveTo(destination)
+                else
+                    return false, "Movement stuck"
+                end
+            end
+        end
+
+        task.wait(MERCHANT_PROGRESS_CHECK_INTERVAL)
+    end
+
+    if (hrp.Position - destination).Magnitude <= arriveDistance then
+        return true, "Reached"
+    end
+
+    return false, "Move timeout"
+end
+
+local function getMerchantApproachTargets(targetPosition)
+    local targets = { targetPosition }
+
+    for ring = 1, MERCHANT_APPROACH_RING_COUNT do
+        local radius = ring * MERCHANT_APPROACH_RING_STEP
+        local diagonal = radius * 0.7071
+
+        table.insert(targets, targetPosition + Vector3.new(radius, 0, 0))
+        table.insert(targets, targetPosition + Vector3.new(-radius, 0, 0))
+        table.insert(targets, targetPosition + Vector3.new(0, 0, radius))
+        table.insert(targets, targetPosition + Vector3.new(0, 0, -radius))
+
+        table.insert(targets, targetPosition + Vector3.new(diagonal, 0, diagonal))
+        table.insert(targets, targetPosition + Vector3.new(-diagonal, 0, diagonal))
+        table.insert(targets, targetPosition + Vector3.new(diagonal, 0, -diagonal))
+        table.insert(targets, targetPosition + Vector3.new(-diagonal, 0, -diagonal))
+    end
+
+    return targets
+end
+
+local function walkToPosition(targetPosition)
+    local character = getCharacter()
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not hrp then
+        return false, "Character not ready"
+    end
+
+    local function closeEnough(goalPosition, distance)
+        local goal = goalPosition or targetPosition
+        local maxDistance = distance or MERCHANT_REACH_DISTANCE
+        return (hrp.Position - goal).Magnitude <= maxDistance
+    end
+
+    if closeEnough(targetPosition, MERCHANT_REACH_DISTANCE) then
+        return true, "Already near merchant"
+    end
+
+    local function nudgeAroundObstacle(attempt)
+        local toTarget = targetPosition - hrp.Position
+        local flat = Vector3.new(toTarget.X, 0, toTarget.Z)
+        if flat.Magnitude < 0.001 then
+            humanoid.Jump = true
+            task.wait(0.1)
+            return
+        end
+
+        local forward = flat.Unit
+        local side = Vector3.new(-forward.Z, 0, forward.X)
+        if attempt % 2 == 0 then
+            side = -side
+        end
+        local nudgeDistance = MERCHANT_NUDGE_DISTANCE + ((attempt - 1) * 1.4)
+        local nudgeTarget = hrp.Position + (side * nudgeDistance)
+        humanoid.Jump = true
+        moveToWithProgress(humanoid, hrp, nudgeTarget, 1.0, 2.8)
+    end
+
+    local function chooseBestPathFromCurrentPosition()
+        local startPosition = hrp.Position
+        local approachTargets = getMerchantApproachTargets(targetPosition)
+
+        local bestPath = nil
+        local bestTarget = nil
+        local bestCost = math.huge
+
+        for _, approachTarget in ipairs(approachTargets) do
+            local path = createMerchantPath()
+            local okCompute = pcall(function()
+                path:ComputeAsync(startPosition, approachTarget)
+            end)
+
+            if okCompute and path.Status == Enum.PathStatus.Success then
+                local cost = getPathLengthFromWaypoints(startPosition, path:GetWaypoints(), approachTarget)
+                if cost < bestCost then
+                    bestCost = cost
+                    bestPath = path
+                    bestTarget = approachTarget
+                end
+            end
+        end
+
+        return bestPath, bestTarget
+    end
+
+    local function followPath(path, approachTarget)
+        local blockedIndex = math.huge
+        local blockedConnection = path.Blocked:Connect(function(index)
+            if index < blockedIndex then
+                blockedIndex = index
+            end
+        end)
+
+        local waypoints = path:GetWaypoints()
+        local failReason = nil
+
+        for index, waypoint in ipairs(waypoints) do
+            if blockedIndex <= (index + 1) then
+                failReason = "Path blocked"
+                break
+            end
+
+            local verticalDelta = waypoint.Position.Y - hrp.Position.Y
+            if waypoint.Action == Enum.PathWaypointAction.Jump or verticalDelta > 1.75 then
+                humanoid.Jump = true
+                task.wait(0.03)
+            end
+
+            local reachedStep, stepReason = moveToWithProgress(
+                humanoid,
+                hrp,
+                waypoint.Position,
+                MERCHANT_WAYPOINT_TIMEOUT,
+                MERCHANT_WAYPOINT_REACH_DISTANCE
+            )
+            if not reachedStep then
+                failReason = stepReason or "Failed waypoint move"
+                break
+            end
+
+            if closeEnough(targetPosition, MERCHANT_REACH_DISTANCE) then
+                blockedConnection:Disconnect()
+                return true, "Reached merchant"
+            end
+        end
+
+        blockedConnection:Disconnect()
+
+        if failReason then
+            return false, failReason
+        end
+
+        if not closeEnough(approachTarget, MERCHANT_WAYPOINT_REACH_DISTANCE) then
+            local reachedApproach, approachReason = moveToWithProgress(
+                humanoid,
+                hrp,
+                approachTarget,
+                MERCHANT_MOVE_TIMEOUT,
+                MERCHANT_WAYPOINT_REACH_DISTANCE
+            )
+            if not reachedApproach then
+                return false, approachReason or "Failed approach target"
+            end
+        end
+
+        if not closeEnough(targetPosition, MERCHANT_REACH_DISTANCE) then
+            local reachedFinal, finalReason = moveToWithProgress(
+                humanoid,
+                hrp,
+                targetPosition,
+                MERCHANT_MOVE_TIMEOUT,
+                MERCHANT_REACH_DISTANCE
+            )
+            if not reachedFinal then
+                return false, finalReason or "Final approach failed"
+            end
+        end
+
+        return true, "Reached merchant"
+    end
+
+    local lastReason = "No path found"
+
+    for attempt = 1, MERCHANT_PATH_RETRIES do
+        if closeEnough(targetPosition, MERCHANT_REACH_DISTANCE) then
+            return true, "Reached merchant"
+        end
+
+        local bestPath, bestTarget = chooseBestPathFromCurrentPosition()
+        if bestPath and bestTarget then
+            local reachedPath, pathReason = followPath(bestPath, bestTarget)
+            if reachedPath then
+                return true, "Reached merchant"
+            end
+            lastReason = pathReason or "Path follow failed"
+        else
+            local reachedDirect, directReason = moveToWithProgress(
+                humanoid,
+                hrp,
+                targetPosition,
+                MERCHANT_MOVE_TIMEOUT,
+                MERCHANT_REACH_DISTANCE
+            )
+            if reachedDirect then
+                return true, "Reached with direct move"
+            end
+            lastReason = directReason or "No valid path"
+        end
+
+        if attempt < MERCHANT_PATH_RETRIES then
+            nudgeAroundObstacle(attempt)
+        end
+    end
+
+    if closeEnough(targetPosition, MERCHANT_REACH_DISTANCE) then
+        return true, "Reached merchant"
+    end
+
+    return false, "Could not reach target (" .. tostring(lastReason) .. ")"
+end
+
+local function pressEOnce()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+    end)
+    task.wait(INTERACT_HOLD_TIME)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    end)
+    task.wait(INTERACT_RELEASE_DELAY)
+end
+
+local function clearMerchantWayDots()
+    for index = #STATE.merchantWayDots, 1, -1 do
+        local dot = STATE.merchantWayDots[index]
+        if typeof(dot) == "Instance" and dot.Parent then
+            dot:Destroy()
+        end
+        STATE.merchantWayDots[index] = nil
+    end
+
+    local folder = workspace:FindFirstChild(MERCHANT_WAY_FOLDER_NAME)
+    if folder and #folder:GetChildren() == 0 then
+        folder:Destroy()
+    end
+end
+
+local function ensureMerchantWayDotsFolder()
+    local folder = workspace:FindFirstChild(MERCHANT_WAY_FOLDER_NAME)
+    if folder then
+        return folder
+    end
+
+    folder = Instance.new("Folder")
+    folder.Name = MERCHANT_WAY_FOLDER_NAME
+    folder.Parent = workspace
+    return folder
+end
+
+local function addMerchantWayPoint(position, makeDot)
+    if typeof(position) ~= "Vector3" then
+        return false
+    end
+
+    local waypoints = STATE.merchantWaypoints
+    local lastWaypoint = waypoints[#waypoints]
+    if lastWaypoint and (position - lastWaypoint).Magnitude < MERCHANT_WAY_SAMPLE_DISTANCE then
+        return false
+    end
+
+    if #waypoints >= MERCHANT_WAY_MAX_POINTS then
+        return false
+    end
+
+    table.insert(waypoints, position)
+    STATE.lastMerchantWaySample = position
+
+    if makeDot then
+        local dot = Instance.new("Part")
+        dot.Name = "MerchantWayDot"
+        dot.Shape = Enum.PartType.Ball
+        dot.Size = Vector3.new(MERCHANT_WAY_DOT_SIZE, MERCHANT_WAY_DOT_SIZE, MERCHANT_WAY_DOT_SIZE)
+        dot.Material = Enum.Material.Neon
+        dot.Color = Color3.new(1, 1, 1)
+        dot.Transparency = MERCHANT_WAY_DOT_TRANSPARENCY
+        dot.Anchored = true
+        dot.CanCollide = false
+        dot.CanTouch = false
+        dot.CanQuery = false
+        dot.CastShadow = false
+        dot.CFrame = CFrame.new(position)
+        dot.Parent = ensureMerchantWayDotsFolder()
+        table.insert(STATE.merchantWayDots, dot)
+    end
+
+    return true
+end
+
+local function startMerchantWayRecording()
+    STATE.merchantWayRecording = false
+    STATE.lastMerchantWaySample = nil
+    STATE.merchantWaypoints = {}
+    clearMerchantWayDots()
+
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local startPos = hrp and hrp.Position or nil
+    if typeof(startPos) ~= "Vector3" then
+        return false, "Spawn first to record merchant way"
+    end
+
+    addMerchantWayPoint(startPos, true)
+    STATE.merchantWayRecording = true
+    return true, "Recording merchant way..."
+end
+
+local function stopMerchantWayRecording()
+    if not STATE.merchantWayRecording then
+        if #STATE.merchantWaypoints >= 2 then
+            return true, string.format("Merchant way already saved (%d points)", #STATE.merchantWaypoints)
+        end
+        return false, "Merchant way recording is not active"
+    end
+
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local currentPos = hrp and hrp.Position or nil
+    if typeof(currentPos) == "Vector3" then
+        addMerchantWayPoint(currentPos, true)
+    end
+
+    STATE.merchantWayRecording = false
+    STATE.lastMerchantWaySample = nil
+
+    if #STATE.merchantWaypoints < 2 then
+        return false, "Path too short, record at least 2 points"
+    end
+
+    return true, string.format("Merchant way saved (%d points)", #STATE.merchantWaypoints)
+end
+
+local function deleteMerchantWay()
+    STATE.merchantWayRecording = false
+    STATE.lastMerchantWaySample = nil
+    STATE.merchantWaypoints = {}
+    clearMerchantWayDots()
+    return true, "Merchant way deleted"
+end
+
+local function hasRecordedMerchantWay()
+    return #STATE.merchantWaypoints >= 2
+end
+
+local function travelRecordedMerchantWay(reverseDirection)
+    if not hasRecordedMerchantWay() then
+        return false, "No merchant way recorded"
+    end
+
+    local waypoints = STATE.merchantWaypoints
+    local startIndex, endIndex, step
+    if reverseDirection then
+        startIndex = #waypoints
+        endIndex = 1
+        step = -1
+    else
+        startIndex = 1
+        endIndex = #waypoints
+        step = 1
+    end
+
+    local index = startIndex
+    while true do
+        local waypoint = waypoints[index]
+        if typeof(waypoint) == "Vector3" then
+            local character = getCharacter()
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if not hrp then
+                return false, "Character not ready"
+            end
+
+            local slideSpeed = getMerchantSlideSpeed()
+            local timeout = computeSlideTimeout(hrp.Position, waypoint, slideSpeed)
+            local reached, moveMsg = slideToPosition(waypoint, slideSpeed, timeout, MERCHANT_WAY_SEGMENT_REACH)
+            if not reached then
+                return false, "Merchant way failed (" .. tostring(moveMsg) .. ")"
+            end
+        end
+
+        if index == endIndex then
+            break
+        end
+        index = index + step
+    end
+
+    return true, "Merchant way complete"
+end
+
+local function runMerchantSell(sellAllRemote, returnPosition)
+    local character = getCharacter()
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not hrp then
+        return false, "Character not ready"
+    end
+
+    local restoreFly = STATE.flyEnabled
+    if restoreFly then
+        STATE.flyEnabled = false
+        STATE.flyTargetPosition = nil
+    end
+
+    local function finish(success, message)
+        if restoreFly and not STATE.closed then
+            STATE.flyEnabled = true
+            if hrp and hrp.Parent then
+                STATE.flyTargetPosition = hrp.Position
+            end
+        end
+        return success, message
+    end
+
+    local usedRecordedWay = false
+    local slideSpeed = getMerchantSlideSpeed()
+    if hasRecordedMerchantWay() then
+        local routed, routeMsg = travelRecordedMerchantWay(false)
+        if routed then
+            usedRecordedWay = true
+        else
+            warn("Merchant way route failed, falling back:", routeMsg)
+        end
+    end
+
+    local candidates = findMerchantCandidates(hrp.Position)
+    if #candidates == 0 then
+        return finish(false, "No Merchant found")
+    end
+
+    local chosenCandidate, chosenPosition = chooseBestMerchantCandidate(candidates, hrp.Position)
+    if not chosenCandidate or not chosenPosition then
+        return finish(false, "No reachable merchant")
+    end
+
+    if not usedRecordedWay then
+        local walked, walkMsg = slideToPositionWithLift(chosenPosition, slideSpeed, MERCHANT_SLIDE_REACH_DISTANCE, MERCHANT_SLIDE_LIFT_HEIGHT)
+        if not walked then
+            return finish(false, walkMsg or "Failed to reach merchant")
+        end
+    end
+
+    local chosenMerchant = chosenCandidate.object
+    local latestPos = getInteractionPositionFromContainer(chosenMerchant) or getObjectPosition(chosenMerchant) or chosenPosition
+    if (hrp.Position - latestPos).Magnitude > MERCHANT_REACH_DISTANCE then
+        local adjusted, adjustMsg = slideToPositionWithLift(latestPos, slideSpeed, MERCHANT_SLIDE_REACH_DISTANCE, MERCHANT_SLIDE_LIFT_HEIGHT)
+        if not adjusted then
+            return finish(false, adjustMsg)
+        end
+    end
+
+    if (hrp.Position - latestPos).Magnitude > MERCHANT_REACH_DISTANCE then
+        return finish(false, "Not close enough to merchant")
+    end
+
+    if humanoid and humanoid.Sit then
+        humanoid.Sit = false
+    end
+    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+
+    pressEOnce()
+    task.wait(MERCHANT_SELL_DELAY_SECONDS)
+
+    local sold = pcall(function()
+        sellAllRemote:InvokeServer()
+    end)
+
+    if not sold then
+        return finish(false, "SellAll invoke failed")
+    end
+
+    if typeof(returnPosition) == "Vector3" then
+        local returnedByWay = false
+        if usedRecordedWay then
+            local routedBack, routeBackMsg = travelRecordedMerchantWay(true)
+            if routedBack then
+                returnedByWay = true
+            else
+                warn("Merchant way return failed, using direct return:", routeBackMsg)
+            end
+        end
+
+        if not returnedByWay and (hrp.Position - returnPosition).Magnitude > MERCHANT_REACH_DISTANCE then
+            local returned, returnMsg = slideToPositionWithLift(returnPosition, slideSpeed, MERCHANT_SLIDE_REACH_DISTANCE, MERCHANT_SLIDE_LIFT_HEIGHT)
+            if not returned then
+                return finish(false, "Return slide failed (" .. tostring(returnMsg) .. ")")
+            end
+        end
+    end
+
+    return finish(true, typeof(returnPosition) == "Vector3" and "Sold and returned" or "Sold")
+end
+
+local function getCurrentPosition()
+    local character = player.Character
+    if not character then
+        return nil
+    end
+
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return nil
+    end
+
+    return hrp.Position
+end
+
+local function formatPosition(position)
+    if not position then
+        return "not set"
+    end
+    return string.format("X %.1f, Y %.1f, Z %.1f", position.X, position.Y, position.Z)
+end
+
+local function getShakeDuration()
+    if STATE.customShakeTime then
+        return STATE.customShakeTime
+    end
+    return MAX_SHAKE_TIME
+end
+
+local function formatShakeDuration()
+    local duration = getShakeDuration()
+    if STATE.customShakeTime then
+        return string.format("%.2fs (Custom)", duration)
+    end
+    return string.format("%.2fs (Default)", duration)
+end
+
+local function teleportTo(position)
+    local character = getCharacter()
+    local hrp = getHumanoidRootPart(character)
+    local target = CFrame.new(position)
+
+    STATE.flyTargetPosition = position
+
+    hrp.CFrame = target
+    task.wait(0.05)
+    hrp.CFrame = target
+end
+
+local function extractSandStats(panTool)
+    local amount
+    local capacity
+
+    for _, obj in ipairs(panTool:GetDescendants()) do
+        if obj:IsA("IntValue") or obj:IsA("NumberValue") then
+            local name = string.lower(obj.Name)
+
+            if not amount and (name:find("sand") or name:find("fill")) and not name:find("cap") and not name:find("max") then
+                amount = obj.Value
+            end
+
+            if not capacity and (name:find("cap") or name:find("max")) and (name:find("sand") or name:find("pan") or name:find("fill")) then
+                capacity = obj.Value
+            end
+        end
+    end
+
+    local attrs = panTool:GetAttributes()
+    for name, value in pairs(attrs) do
+        if type(value) == "number" then
+            local lower = string.lower(name)
+
+            if not amount and (lower:find("sand") or lower:find("fill")) and not lower:find("cap") and not lower:find("max") then
+                amount = value
+            end
+
+            if not capacity and (lower:find("cap") or lower:find("max")) and (lower:find("sand") or lower:find("pan") or lower:find("fill")) then
+                capacity = value
+            end
+        end
+    end
+
+    return amount, capacity
+end
+
+local function resultLooksLikeFull(...)
+    local count = select("#", ...)
+    if count == 0 then
+        return false
+    end
+
+    for index = 1, count do
+        local value = select(index, ...)
+        if typeof(value) == "string" then
+            local text = string.lower(value)
+            if text:find("full") or text:find("max") or text:find("cannot") then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function collectUntilFull(collectRemote, panTool)
+    local started = os.clock()
+    local calls = 0
+    local lastAmount = select(1, extractSandStats(panTool))
+    local staleCount = 0
+
+    while true do
+        calls = calls + 1
+
+        local ok, r1, r2, r3 = pcall(function()
+            return collectRemote:InvokeServer(table.unpack(COLLECT_ARGS))
+        end)
+
+        local currentAmount, currentCapacity = extractSandStats(panTool)
+        local elapsed = os.clock() - started
+        local passedMinimum = elapsed >= COLLECT_MIN_TIME and calls >= MIN_COLLECT_CALLS
+
+        if currentAmount ~= nil then
+            if currentCapacity and currentAmount >= currentCapacity and passedMinimum then
+                break
+            end
+
+            if lastAmount ~= nil then
+                if currentAmount > lastAmount then
+                    staleCount = 0
+                else
+                    staleCount = staleCount + 1
+                end
+            end
+            lastAmount = currentAmount
+
+            if staleCount >= COLLECT_STALE_LIMIT and passedMinimum then
+                break
+            end
+        else
+            if ok and resultLooksLikeFull(r1, r2, r3) and passedMinimum then
+                break
+            end
+        end
+
+        if elapsed >= COLLECT_MAX_TIME then
+            break
+        end
+
+        task.wait(COLLECT_TICK)
+    end
+end
+
+local function shakeUntilEmpty(shakeRemote, panTool)
+    local shakeDuration = getShakeDuration()
+    local initialAmount = select(1, extractSandStats(panTool))
+    if initialAmount == nil then
+        local startedNoStats = os.clock()
+        while os.clock() - startedNoStats < shakeDuration do
+            shakeRemote:FireServer()
+            task.wait(0.12)
+        end
+        return
+    end
+
+    local started = os.clock()
+
+    while os.clock() - started < shakeDuration do
+        shakeRemote:FireServer()
+        task.wait(0.12)
+
+        local amount = select(1, extractSandStats(panTool))
+        if amount and amount <= 0 then
+            return
+        end
+    end
+
+    task.wait(1)
+end
+
+local function getFlyDirection()
+    local camera = workspace.CurrentCamera
+    if not camera then
+        return Vector3.new(0, 0, 0)
+    end
+
+    local look = camera.CFrame.LookVector
+    local right = camera.CFrame.RightVector
+
+    local forwardFlat = Vector3.new(look.X, 0, look.Z)
+    if forwardFlat.Magnitude > 0.001 then
+        forwardFlat = forwardFlat.Unit
+    else
+        forwardFlat = Vector3.new(0, 0, -1)
+    end
+
+    local rightFlat = Vector3.new(right.X, 0, right.Z)
+    if rightFlat.Magnitude > 0.001 then
+        rightFlat = rightFlat.Unit
+    else
+        rightFlat = Vector3.new(1, 0, 0)
+    end
+
+    local direction = Vector3.new(0, 0, 0)
+
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) or UserInputService:IsKeyDown(Enum.KeyCode.Up) then
+        direction = direction + forwardFlat
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) or UserInputService:IsKeyDown(Enum.KeyCode.Down) then
+        direction = direction - forwardFlat
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) or UserInputService:IsKeyDown(Enum.KeyCode.Right) then
+        direction = direction + rightFlat
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) or UserInputService:IsKeyDown(Enum.KeyCode.Left) then
+        direction = direction - rightFlat
+    end
+
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+        direction = direction + Vector3.new(0, 1, 0)
+    end
+
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+        or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+        or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+        or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+    then
+        direction = direction - Vector3.new(0, 1, 0)
+    end
+
+    if direction.Magnitude > 0 then
+        return direction.Unit
+    end
+
+    return Vector3.new(0, 0, 0)
+end
+
+local function runOneCycle()
+    local character = getCharacter()
+    local panTool = getPanTool(character)
+    if not panTool then
+        task.wait(0.5)
+        return
+    end
+
+    local collectRemote, panRemote, shakeRemote = getPanRemotes(panTool)
+    if not collectRemote or not panRemote or not shakeRemote then
+        STATE.activePanName = "Invalid pan remotes"
+        refreshUiIfReady()
+        task.wait(0.5)
+        return
+    end
+
+    local sellAllRemote = getSellAllRemote()
+
+    teleportTo(STATE.sandPosition)
+    task.wait(0.25)
+    collectUntilFull(collectRemote, panTool)
+
+    teleportTo(STATE.waterPosition)
+    task.wait(0.25)
+
+    pcall(function()
+        panRemote:InvokeServer()
+    end)
+
+    task.wait(0.2)
+    shakeUntilEmpty(shakeRemote, panTool)
+
+    if STATE.autoSell and shouldRunMerchantSellNow() then
+        local returnPosition = getCurrentPosition()
+        local wasRunning = STATE.running
+
+        STATE.pausedForMerchant = true
+        STATE.running = false
+        refreshUiIfReady()
+
+        local okSellCall, sold, sellMsg = pcall(runMerchantSell, sellAllRemote, returnPosition)
+        if not okSellCall then
+            warn("Merchant sell failed:", sold)
+        elseif not sold then
+            warn("Merchant sell failed:", sellMsg)
+        end
+
+        local merchantFinishedAt = getNowTime()
+        STATE.lastMerchantSellAt = merchantFinishedAt
+        scheduleNextMerchantSell(merchantFinishedAt)
+        STATE.pausedForMerchant = false
+        if wasRunning and not STATE.closed then
+            STATE.running = true
+        end
+        refreshUiIfReady()
+    end
+
+    refreshUiIfReady()
+    task.wait(LOOP_DELAY)
+end
+
+local function createGui()
+    local playerGui = player:WaitForChild("PlayerGui")
+
+    local existing = playerGui:FindFirstChild("FocusGoldFarmGui")
+    if existing then
+        existing:Destroy()
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "FocusGoldFarmGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.Parent = playerGui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Main"
+    frame.Size = UDim2.new(0, 320, 0, 1020)
+    frame.Position = UDim2.new(0.5, -160, 0.5, -510)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 24, 30)
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = frame
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 34)
+    titleBar.BackgroundColor3 = Color3.fromRGB(34, 40, 52)
+    titleBar.BorderSizePixel = 0
+    titleBar.Active = true
+    titleBar.Parent = frame
+
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 10)
+    titleCorner.Parent = titleBar
+
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.BackgroundTransparency = 1
+    title.Size = UDim2.new(1, -42, 1, 0)
+    title.Position = UDim2.new(0, 10, 0, 0)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 14
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextColor3 = Color3.fromRGB(242, 246, 255)
+    title.Text = "Focus"
+    title.Parent = titleBar
+
+    local closeButton = Instance.new("TextButton")
+    closeButton.Name = "Close"
+    closeButton.Size = UDim2.new(0, 30, 0, 24)
+    closeButton.Position = UDim2.new(1, -34, 0, 5)
+    closeButton.BackgroundColor3 = Color3.fromRGB(165, 58, 58)
+    closeButton.BorderSizePixel = 0
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 14
+    closeButton.TextColor3 = Color3.new(1, 1, 1)
+    closeButton.Text = "X"
+    closeButton.Parent = titleBar
+
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    closeCorner.Parent = closeButton
+
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "Toggle"
+    toggleButton.Size = UDim2.new(1, -20, 0, 34)
+    toggleButton.Position = UDim2.new(0, 10, 0, 50)
+    toggleButton.BorderSizePixel = 0
+    toggleButton.Font = Enum.Font.GothamBold
+    toggleButton.TextSize = 15
+    toggleButton.TextColor3 = Color3.new(1, 1, 1)
+    toggleButton.Parent = frame
+
+    local toggleCorner = Instance.new("UICorner")
+    toggleCorner.CornerRadius = UDim.new(0, 6)
+    toggleCorner.Parent = toggleButton
+
+    local autoSellButton = Instance.new("TextButton")
+    autoSellButton.Name = "AutoSellToggle"
+    autoSellButton.Size = UDim2.new(1, -20, 0, 34)
+    autoSellButton.Position = UDim2.new(0, 10, 0, 92)
+    autoSellButton.BorderSizePixel = 0
+    autoSellButton.Font = Enum.Font.GothamBold
+    autoSellButton.TextSize = 15
+    autoSellButton.TextColor3 = Color3.new(1, 1, 1)
+    autoSellButton.Parent = frame
+
+    local autoSellCorner = Instance.new("UICorner")
+    autoSellCorner.CornerRadius = UDim.new(0, 6)
+    autoSellCorner.Parent = autoSellButton
+
+    local flyToggleButton = Instance.new("TextButton")
+    flyToggleButton.Name = "FlyToggle"
+    flyToggleButton.Size = UDim2.new(1, -20, 0, 34)
+    flyToggleButton.Position = UDim2.new(0, 10, 0, 134)
+    flyToggleButton.BorderSizePixel = 0
+    flyToggleButton.Font = Enum.Font.GothamBold
+    flyToggleButton.TextSize = 15
+    flyToggleButton.TextColor3 = Color3.new(1, 1, 1)
+    flyToggleButton.Parent = frame
+
+    local flyToggleCorner = Instance.new("UICorner")
+    flyToggleCorner.CornerRadius = UDim.new(0, 6)
+    flyToggleCorner.Parent = flyToggleButton
+
+    local flySpeedLabel = Instance.new("TextLabel")
+    flySpeedLabel.Name = "FlySpeedLabel"
+    flySpeedLabel.BackgroundTransparency = 1
+    flySpeedLabel.Size = UDim2.new(1, -20, 0, 18)
+    flySpeedLabel.Position = UDim2.new(0, 10, 0, 176)
+    flySpeedLabel.Font = Enum.Font.Gotham
+    flySpeedLabel.TextSize = 13
+    flySpeedLabel.TextColor3 = Color3.fromRGB(220, 228, 240)
+    flySpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+    flySpeedLabel.Parent = frame
+
+    local flySpeedTrack = Instance.new("Frame")
+    flySpeedTrack.Name = "FlySpeedTrack"
+    flySpeedTrack.Size = UDim2.new(1, -20, 0, 12)
+    flySpeedTrack.Position = UDim2.new(0, 10, 0, 198)
+    flySpeedTrack.BackgroundColor3 = Color3.fromRGB(56, 62, 75)
+    flySpeedTrack.BorderSizePixel = 0
+    flySpeedTrack.Active = true
+    flySpeedTrack.Parent = frame
+
+    local flyTrackCorner = Instance.new("UICorner")
+    flyTrackCorner.CornerRadius = UDim.new(0, 6)
+    flyTrackCorner.Parent = flySpeedTrack
+
+    local flySpeedFill = Instance.new("Frame")
+    flySpeedFill.Name = "Fill"
+    flySpeedFill.Size = UDim2.new(0, 0, 1, 0)
+    flySpeedFill.BackgroundColor3 = Color3.fromRGB(77, 146, 255)
+    flySpeedFill.BorderSizePixel = 0
+    flySpeedFill.Parent = flySpeedTrack
+
+    local flyFillCorner = Instance.new("UICorner")
+    flyFillCorner.CornerRadius = UDim.new(0, 6)
+    flyFillCorner.Parent = flySpeedFill
+
+    local flySpeedKnob = Instance.new("Frame")
+    flySpeedKnob.Name = "Knob"
+    flySpeedKnob.Size = UDim2.new(0, 16, 0, 16)
+    flySpeedKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+    flySpeedKnob.Position = UDim2.new(0, 0, 0.5, 0)
+    flySpeedKnob.BackgroundColor3 = Color3.fromRGB(236, 243, 255)
+    flySpeedKnob.BorderSizePixel = 0
+    flySpeedKnob.Active = true
+    flySpeedKnob.Parent = flySpeedTrack
+
+    local flyKnobCorner = Instance.new("UICorner")
+    flyKnobCorner.CornerRadius = UDim.new(1, 0)
+    flyKnobCorner.Parent = flySpeedKnob
+
+    local shakeInput = Instance.new("TextBox")
+    shakeInput.Name = "ShakeInput"
+    shakeInput.Size = UDim2.new(1, -20, 0, 34)
+    shakeInput.Position = UDim2.new(0, 10, 0, 220)
+    shakeInput.BackgroundColor3 = Color3.fromRGB(50, 56, 68)
+    shakeInput.BorderSizePixel = 0
+    shakeInput.Font = Enum.Font.Gotham
+    shakeInput.TextSize = 14
+    shakeInput.TextColor3 = Color3.new(1, 1, 1)
+    shakeInput.PlaceholderText = "Type shake seconds (0.25 - 30), empty = default"
+    shakeInput.Text = ""
+    shakeInput.Parent = frame
+
+    local shakeInputCorner = Instance.new("UICorner")
+    shakeInputCorner.CornerRadius = UDim.new(0, 6)
+    shakeInputCorner.Parent = shakeInput
+
+    local merchantIntervalInput = Instance.new("TextBox")
+    merchantIntervalInput.Name = "MerchantIntervalInput"
+    merchantIntervalInput.Size = UDim2.new(1, -20, 0, 34)
+    merchantIntervalInput.Position = UDim2.new(0, 10, 0, 262)
+    merchantIntervalInput.BackgroundColor3 = Color3.fromRGB(50, 56, 68)
+    merchantIntervalInput.BorderSizePixel = 0
+    merchantIntervalInput.Font = Enum.Font.Gotham
+    merchantIntervalInput.TextSize = 14
+    merchantIntervalInput.TextColor3 = Color3.new(1, 1, 1)
+    merchantIntervalInput.PlaceholderText = "Merchant sell interval minutes (0.1 - 120)"
+    merchantIntervalInput.Text = ""
+    merchantIntervalInput.Parent = frame
+
+    local merchantIntervalCorner = Instance.new("UICorner")
+    merchantIntervalCorner.CornerRadius = UDim.new(0, 6)
+    merchantIntervalCorner.Parent = merchantIntervalInput
+
+    local autoLockToggleButton = Instance.new("TextButton")
+    autoLockToggleButton.Name = "AutoLockToggle"
+    autoLockToggleButton.Size = UDim2.new(1, -186, 0, 34)
+    autoLockToggleButton.Position = UDim2.new(0, 10, 0, 304)
+    autoLockToggleButton.BorderSizePixel = 0
+    autoLockToggleButton.Font = Enum.Font.GothamBold
+    autoLockToggleButton.TextSize = 14
+    autoLockToggleButton.TextColor3 = Color3.new(1, 1, 1)
+    autoLockToggleButton.Parent = frame
+
+    local autoLockCorner = Instance.new("UICorner")
+    autoLockCorner.CornerRadius = UDim.new(0, 6)
+    autoLockCorner.Parent = autoLockToggleButton
+
+    local autoUnlockToggleButton = Instance.new("TextButton")
+    autoUnlockToggleButton.Name = "AutoUnlockToggle"
+    autoUnlockToggleButton.Size = UDim2.new(1, -186, 0, 34)
+    autoUnlockToggleButton.Position = UDim2.new(0, 10, 0, 344)
+    autoUnlockToggleButton.BorderSizePixel = 0
+    autoUnlockToggleButton.Font = Enum.Font.GothamBold
+    autoUnlockToggleButton.TextSize = 14
+    autoUnlockToggleButton.TextColor3 = Color3.new(1, 1, 1)
+    autoUnlockToggleButton.Parent = frame
+
+    local autoUnlockCorner = Instance.new("UICorner")
+    autoUnlockCorner.CornerRadius = UDim.new(0, 6)
+    autoUnlockCorner.Parent = autoUnlockToggleButton
+
+    local saveLockButton = Instance.new("TextButton")
+    saveLockButton.Name = "SaveLockButton"
+    saveLockButton.Size = UDim2.new(0, 74, 0, 26)
+    saveLockButton.Position = UDim2.new(1, -168, 0, 308)
+    saveLockButton.BackgroundColor3 = Color3.fromRGB(61, 111, 160)
+    saveLockButton.BorderSizePixel = 0
+    saveLockButton.Font = Enum.Font.GothamBold
+    saveLockButton.TextSize = 12
+    saveLockButton.TextColor3 = Color3.new(1, 1, 1)
+    saveLockButton.Text = "Save Config"
+    saveLockButton.Parent = frame
+
+    local saveLockCorner = Instance.new("UICorner")
+    saveLockCorner.CornerRadius = UDim.new(0, 6)
+    saveLockCorner.Parent = saveLockButton
+
+    local loadLockButton = Instance.new("TextButton")
+    loadLockButton.Name = "LoadLockButton"
+    loadLockButton.Size = UDim2.new(0, 74, 0, 26)
+    loadLockButton.Position = UDim2.new(1, -88, 0, 308)
+    loadLockButton.BackgroundColor3 = Color3.fromRGB(61, 111, 160)
+    loadLockButton.BorderSizePixel = 0
+    loadLockButton.Font = Enum.Font.GothamBold
+    loadLockButton.TextSize = 12
+    loadLockButton.TextColor3 = Color3.new(1, 1, 1)
+    loadLockButton.Text = "Load Config"
+    loadLockButton.Parent = frame
+
+    local loadLockCorner = Instance.new("UICorner")
+    loadLockCorner.CornerRadius = UDim.new(0, 6)
+    loadLockCorner.Parent = loadLockButton
+
+    local lockOreDropdownButton = Instance.new("TextButton")
+    lockOreDropdownButton.Name = "LockOreDropdownButton"
+    lockOreDropdownButton.Size = UDim2.new(1, -20, 0, 34)
+    lockOreDropdownButton.Position = UDim2.new(0, 10, 0, 384)
+    lockOreDropdownButton.BackgroundColor3 = Color3.fromRGB(64, 72, 90)
+    lockOreDropdownButton.BorderSizePixel = 0
+    lockOreDropdownButton.Font = Enum.Font.Gotham
+    lockOreDropdownButton.TextSize = 13
+    lockOreDropdownButton.TextColor3 = Color3.new(1, 1, 1)
+    lockOreDropdownButton.TextXAlignment = Enum.TextXAlignment.Left
+    lockOreDropdownButton.Parent = frame
+
+    local lockOreDropdownCorner = Instance.new("UICorner")
+    lockOreDropdownCorner.CornerRadius = UDim.new(0, 6)
+    lockOreDropdownCorner.Parent = lockOreDropdownButton
+
+    local unlockOreDropdownButton = Instance.new("TextButton")
+    unlockOreDropdownButton.Name = "UnlockOreDropdownButton"
+    unlockOreDropdownButton.Size = UDim2.new(1, -20, 0, 34)
+    unlockOreDropdownButton.Position = UDim2.new(0, 10, 0, 424)
+    unlockOreDropdownButton.BackgroundColor3 = Color3.fromRGB(64, 72, 90)
+    unlockOreDropdownButton.BorderSizePixel = 0
+    unlockOreDropdownButton.Font = Enum.Font.Gotham
+    unlockOreDropdownButton.TextSize = 13
+    unlockOreDropdownButton.TextColor3 = Color3.new(1, 1, 1)
+    unlockOreDropdownButton.TextXAlignment = Enum.TextXAlignment.Left
+    unlockOreDropdownButton.Parent = frame
+
+    local unlockOreDropdownCorner = Instance.new("UICorner")
+    unlockOreDropdownCorner.CornerRadius = UDim.new(0, 6)
+    unlockOreDropdownCorner.Parent = unlockOreDropdownButton
+
+    local customOreInput = Instance.new("TextBox")
+    customOreInput.Name = "CustomOreInput"
+    customOreInput.Size = UDim2.new(1, -102, 0, 34)
+    customOreInput.Position = UDim2.new(0, 10, 0, 464)
+    customOreInput.BackgroundColor3 = Color3.fromRGB(50, 56, 68)
+    customOreInput.BorderSizePixel = 0
+    customOreInput.Font = Enum.Font.Gotham
+    customOreInput.TextSize = 13
+    customOreInput.TextColor3 = Color3.new(1, 1, 1)
+    customOreInput.PlaceholderText = "Type custom ore name"
+    customOreInput.Text = ""
+    customOreInput.ClearTextOnFocus = false
+    customOreInput.Parent = frame
+
+    local customOreInputCorner = Instance.new("UICorner")
+    customOreInputCorner.CornerRadius = UDim.new(0, 6)
+    customOreInputCorner.Parent = customOreInput
+
+    local addOreButton = Instance.new("TextButton")
+    addOreButton.Name = "AddOreButton"
+    addOreButton.Size = UDim2.new(0, 74, 0, 34)
+    addOreButton.Position = UDim2.new(1, -84, 0, 464)
+    addOreButton.BackgroundColor3 = Color3.fromRGB(52, 122, 82)
+    addOreButton.BorderSizePixel = 0
+    addOreButton.Font = Enum.Font.GothamBold
+    addOreButton.TextSize = 13
+    addOreButton.TextColor3 = Color3.new(1, 1, 1)
+    addOreButton.Text = "Add"
+    addOreButton.Parent = frame
+
+    local addOreCorner = Instance.new("UICorner")
+    addOreCorner.CornerRadius = UDim.new(0, 6)
+    addOreCorner.Parent = addOreButton
+
+    local lockOreDropdownFrame = Instance.new("Frame")
+    lockOreDropdownFrame.Name = "LockOreDropdown"
+    lockOreDropdownFrame.Size = UDim2.new(1, -20, 0, 150)
+    lockOreDropdownFrame.Position = UDim2.new(0, 10, 0, 506)
+    lockOreDropdownFrame.BackgroundColor3 = Color3.fromRGB(38, 44, 56)
+    lockOreDropdownFrame.BorderSizePixel = 0
+    lockOreDropdownFrame.Visible = false
+    lockOreDropdownFrame.ZIndex = 8
+    lockOreDropdownFrame.Parent = frame
+
+    local lockOreDropdownFrameCorner = Instance.new("UICorner")
+    lockOreDropdownFrameCorner.CornerRadius = UDim.new(0, 6)
+    lockOreDropdownFrameCorner.Parent = lockOreDropdownFrame
+
+    local lockOreScroll = Instance.new("ScrollingFrame")
+    lockOreScroll.Name = "LockOreScroll"
+    lockOreScroll.Size = UDim2.new(1, -8, 1, -8)
+    lockOreScroll.Position = UDim2.new(0, 4, 0, 4)
+    lockOreScroll.BackgroundTransparency = 1
+    lockOreScroll.BorderSizePixel = 0
+    lockOreScroll.ScrollBarThickness = 6
+    lockOreScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    lockOreScroll.ZIndex = 9
+    lockOreScroll.Parent = lockOreDropdownFrame
+
+    local lockOreListLayout = Instance.new("UIListLayout")
+    lockOreListLayout.Padding = UDim.new(0, 4)
+    lockOreListLayout.FillDirection = Enum.FillDirection.Vertical
+    lockOreListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    lockOreListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    lockOreListLayout.Parent = lockOreScroll
+
+    local unlockOreDropdownFrame = Instance.new("Frame")
+    unlockOreDropdownFrame.Name = "UnlockOreDropdown"
+    unlockOreDropdownFrame.Size = UDim2.new(1, -20, 0, 150)
+    unlockOreDropdownFrame.Position = UDim2.new(0, 10, 0, 506)
+    unlockOreDropdownFrame.BackgroundColor3 = Color3.fromRGB(38, 44, 56)
+    unlockOreDropdownFrame.BorderSizePixel = 0
+    unlockOreDropdownFrame.Visible = false
+    unlockOreDropdownFrame.ZIndex = 8
+    unlockOreDropdownFrame.Parent = frame
+
+    local unlockOreDropdownFrameCorner = Instance.new("UICorner")
+    unlockOreDropdownFrameCorner.CornerRadius = UDim.new(0, 6)
+    unlockOreDropdownFrameCorner.Parent = unlockOreDropdownFrame
+
+    local unlockOreScroll = Instance.new("ScrollingFrame")
+    unlockOreScroll.Name = "UnlockOreScroll"
+    unlockOreScroll.Size = UDim2.new(1, -8, 1, -8)
+    unlockOreScroll.Position = UDim2.new(0, 4, 0, 4)
+    unlockOreScroll.BackgroundTransparency = 1
+    unlockOreScroll.BorderSizePixel = 0
+    unlockOreScroll.ScrollBarThickness = 6
+    unlockOreScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    unlockOreScroll.ZIndex = 9
+    unlockOreScroll.Parent = unlockOreDropdownFrame
+
+    local unlockOreListLayout = Instance.new("UIListLayout")
+    unlockOreListLayout.Padding = UDim.new(0, 4)
+    unlockOreListLayout.FillDirection = Enum.FillDirection.Vertical
+    unlockOreListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    unlockOreListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    unlockOreListLayout.Parent = unlockOreScroll
+
+    local lockOreOptionButtons = {}
+    local unlockOreOptionButtons = {}
+
+    local recordMerchantWayButton = Instance.new("TextButton")
+    recordMerchantWayButton.Name = "RecordMerchantWayButton"
+    recordMerchantWayButton.Size = UDim2.new(0, 96, 0, 34)
+    recordMerchantWayButton.Position = UDim2.new(0, 10, 0, 666)
+    recordMerchantWayButton.BackgroundColor3 = Color3.fromRGB(61, 111, 160)
+    recordMerchantWayButton.BorderSizePixel = 0
+    recordMerchantWayButton.Font = Enum.Font.GothamBold
+    recordMerchantWayButton.TextSize = 11
+    recordMerchantWayButton.TextWrapped = true
+    recordMerchantWayButton.TextColor3 = Color3.new(1, 1, 1)
+    recordMerchantWayButton.Text = "Record Merchant Way"
+    recordMerchantWayButton.Parent = frame
+
+    local recordMerchantWayCorner = Instance.new("UICorner")
+    recordMerchantWayCorner.CornerRadius = UDim.new(0, 6)
+    recordMerchantWayCorner.Parent = recordMerchantWayButton
+
+    local stopMerchantWayButton = Instance.new("TextButton")
+    stopMerchantWayButton.Name = "StopMerchantWayButton"
+    stopMerchantWayButton.Size = UDim2.new(0, 96, 0, 34)
+    stopMerchantWayButton.Position = UDim2.new(0, 112, 0, 666)
+    stopMerchantWayButton.BackgroundColor3 = Color3.fromRGB(61, 111, 160)
+    stopMerchantWayButton.BorderSizePixel = 0
+    stopMerchantWayButton.Font = Enum.Font.GothamBold
+    stopMerchantWayButton.TextSize = 11
+    stopMerchantWayButton.TextWrapped = true
+    stopMerchantWayButton.TextColor3 = Color3.new(1, 1, 1)
+    stopMerchantWayButton.Text = "Stop Merchant Way"
+    stopMerchantWayButton.Parent = frame
+
+    local stopMerchantWayCorner = Instance.new("UICorner")
+    stopMerchantWayCorner.CornerRadius = UDim.new(0, 6)
+    stopMerchantWayCorner.Parent = stopMerchantWayButton
+
+    local deleteMerchantWayButton = Instance.new("TextButton")
+    deleteMerchantWayButton.Name = "DeleteMerchantWayButton"
+    deleteMerchantWayButton.Size = UDim2.new(0, 96, 0, 34)
+    deleteMerchantWayButton.Position = UDim2.new(0, 214, 0, 666)
+    deleteMerchantWayButton.BackgroundColor3 = Color3.fromRGB(135, 49, 49)
+    deleteMerchantWayButton.BorderSizePixel = 0
+    deleteMerchantWayButton.Font = Enum.Font.GothamBold
+    deleteMerchantWayButton.TextSize = 11
+    deleteMerchantWayButton.TextWrapped = true
+    deleteMerchantWayButton.TextColor3 = Color3.new(1, 1, 1)
+    deleteMerchantWayButton.Text = "Delete Merchant Way"
+    deleteMerchantWayButton.Parent = frame
+
+    local deleteMerchantWayCorner = Instance.new("UICorner")
+    deleteMerchantWayCorner.CornerRadius = UDim.new(0, 6)
+    deleteMerchantWayCorner.Parent = deleteMerchantWayButton
+
+    local setSandButton = Instance.new("TextButton")
+    setSandButton.Name = "SetSandButton"
+    setSandButton.Size = UDim2.new(1, -20, 0, 34)
+    setSandButton.Position = UDim2.new(0, 10, 0, 708)
+    setSandButton.BackgroundColor3 = Color3.fromRGB(58, 103, 145)
+    setSandButton.BorderSizePixel = 0
+    setSandButton.Font = Enum.Font.GothamBold
+    setSandButton.TextSize = 14
+    setSandButton.TextColor3 = Color3.new(1, 1, 1)
+    setSandButton.Text = "Set Sand Here"
+    setSandButton.Parent = frame
+
+    local setSandCorner = Instance.new("UICorner")
+    setSandCorner.CornerRadius = UDim.new(0, 6)
+    setSandCorner.Parent = setSandButton
+
+    local setWaterButton = Instance.new("TextButton")
+    setWaterButton.Name = "SetWaterButton"
+    setWaterButton.Size = UDim2.new(1, -20, 0, 34)
+    setWaterButton.Position = UDim2.new(0, 10, 0, 748)
+    setWaterButton.BackgroundColor3 = Color3.fromRGB(47, 120, 156)
+    setWaterButton.BorderSizePixel = 0
+    setWaterButton.Font = Enum.Font.GothamBold
+    setWaterButton.TextSize = 14
+    setWaterButton.TextColor3 = Color3.new(1, 1, 1)
+    setWaterButton.Text = "Set Water Here"
+    setWaterButton.Parent = frame
+
+    local setWaterCorner = Instance.new("UICorner")
+    setWaterCorner.CornerRadius = UDim.new(0, 6)
+    setWaterCorner.Parent = setWaterButton
+
+    local sandLabel = Instance.new("TextLabel")
+    sandLabel.Name = "SandLabel"
+    sandLabel.BackgroundTransparency = 1
+    sandLabel.Size = UDim2.new(1, -20, 0, 18)
+    sandLabel.Position = UDim2.new(0, 10, 0, 790)
+    sandLabel.Font = Enum.Font.Gotham
+    sandLabel.TextSize = 13
+    sandLabel.TextColor3 = Color3.fromRGB(230, 235, 245)
+    sandLabel.TextXAlignment = Enum.TextXAlignment.Left
+    sandLabel.Parent = frame
+
+    local waterLabel = Instance.new("TextLabel")
+    waterLabel.Name = "WaterLabel"
+    waterLabel.BackgroundTransparency = 1
+    waterLabel.Size = UDim2.new(1, -20, 0, 18)
+    waterLabel.Position = UDim2.new(0, 10, 0, 808)
+    waterLabel.Font = Enum.Font.Gotham
+    waterLabel.TextSize = 13
+    waterLabel.TextColor3 = Color3.fromRGB(230, 235, 245)
+    waterLabel.TextXAlignment = Enum.TextXAlignment.Left
+    waterLabel.Parent = frame
+
+    local shakeLabel = Instance.new("TextLabel")
+    shakeLabel.Name = "ShakeLabel"
+    shakeLabel.BackgroundTransparency = 1
+    shakeLabel.Size = UDim2.new(1, -20, 0, 18)
+    shakeLabel.Position = UDim2.new(0, 10, 0, 826)
+    shakeLabel.Font = Enum.Font.Gotham
+    shakeLabel.TextSize = 13
+    shakeLabel.TextColor3 = Color3.fromRGB(230, 235, 245)
+    shakeLabel.TextXAlignment = Enum.TextXAlignment.Left
+    shakeLabel.Parent = frame
+
+    local merchantIntervalLabel = Instance.new("TextLabel")
+    merchantIntervalLabel.Name = "MerchantIntervalLabel"
+    merchantIntervalLabel.BackgroundTransparency = 1
+    merchantIntervalLabel.Size = UDim2.new(1, -20, 0, 18)
+    merchantIntervalLabel.Position = UDim2.new(0, 10, 0, 844)
+    merchantIntervalLabel.Font = Enum.Font.Gotham
+    merchantIntervalLabel.TextSize = 13
+    merchantIntervalLabel.TextColor3 = Color3.fromRGB(230, 235, 245)
+    merchantIntervalLabel.TextXAlignment = Enum.TextXAlignment.Left
+    merchantIntervalLabel.Parent = frame
+
+    local flyInfoLabel = Instance.new("TextLabel")
+    flyInfoLabel.Name = "FlyInfo"
+    flyInfoLabel.BackgroundTransparency = 1
+    flyInfoLabel.Size = UDim2.new(1, -20, 0, 18)
+    flyInfoLabel.Position = UDim2.new(0, 10, 0, 862)
+    flyInfoLabel.Font = Enum.Font.Gotham
+    flyInfoLabel.TextSize = 13
+    flyInfoLabel.TextColor3 = Color3.fromRGB(225, 232, 245)
+    flyInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    flyInfoLabel.Parent = frame
+
+    local status = Instance.new("TextLabel")
+    status.Name = "Status"
+    status.BackgroundTransparency = 1
+    status.Size = UDim2.new(1, -20, 0, 22)
+    status.Position = UDim2.new(0, 10, 0, 882)
+    status.Font = Enum.Font.Gotham
+    status.TextSize = 14
+    status.TextColor3 = Color3.fromRGB(222, 228, 239)
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = frame
+
+    local panLabel = Instance.new("TextLabel")
+    panLabel.Name = "PanLabel"
+    panLabel.BackgroundTransparency = 1
+    panLabel.Size = UDim2.new(1, -20, 0, 18)
+    panLabel.Position = UDim2.new(0, 10, 0, 908)
+    panLabel.Font = Enum.Font.Gotham
+    panLabel.TextSize = 13
+    panLabel.TextColor3 = Color3.fromRGB(210, 220, 236)
+    panLabel.TextXAlignment = Enum.TextXAlignment.Left
+    panLabel.Parent = frame
+
+    local hintLabel = Instance.new("TextLabel")
+    hintLabel.Name = "HintLabel"
+    hintLabel.BackgroundTransparency = 1
+    hintLabel.Size = UDim2.new(1, -20, 0, 16)
+    hintLabel.Position = UDim2.new(0, 10, 0, 930)
+    hintLabel.Font = Enum.Font.Gotham
+    hintLabel.TextSize = 12
+    hintLabel.TextColor3 = Color3.fromRGB(173, 184, 204)
+    hintLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hintLabel.Text = "Fly controls: WASD + Space/Ctrl"
+    hintLabel.Parent = frame
+
+    local merchantSpeedLabel = Instance.new("TextLabel")
+    merchantSpeedLabel.Name = "MerchantSpeedLabel"
+    merchantSpeedLabel.BackgroundTransparency = 1
+    merchantSpeedLabel.Size = UDim2.new(1, -20, 0, 18)
+    merchantSpeedLabel.Position = UDim2.new(0, 10, 0, 952)
+    merchantSpeedLabel.Font = Enum.Font.Gotham
+    merchantSpeedLabel.TextSize = 13
+    merchantSpeedLabel.TextColor3 = Color3.fromRGB(212, 223, 240)
+    merchantSpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+    merchantSpeedLabel.Text = "AutoSell Speed: 16"
+    merchantSpeedLabel.Parent = frame
+
+    local merchantSpeedTrack = Instance.new("Frame")
+    merchantSpeedTrack.Name = "MerchantSpeedTrack"
+    merchantSpeedTrack.Size = UDim2.new(1, -20, 0, 12)
+    merchantSpeedTrack.Position = UDim2.new(0, 10, 0, 972)
+    merchantSpeedTrack.BackgroundColor3 = Color3.fromRGB(56, 62, 75)
+    merchantSpeedTrack.BorderSizePixel = 0
+    merchantSpeedTrack.Active = true
+    merchantSpeedTrack.Parent = frame
+
+    local merchantTrackCorner = Instance.new("UICorner")
+    merchantTrackCorner.CornerRadius = UDim.new(0, 6)
+    merchantTrackCorner.Parent = merchantSpeedTrack
+
+    local merchantSpeedFill = Instance.new("Frame")
+    merchantSpeedFill.Name = "Fill"
+    merchantSpeedFill.Size = UDim2.new(0, 0, 1, 0)
+    merchantSpeedFill.BackgroundColor3 = Color3.fromRGB(159, 103, 57)
+    merchantSpeedFill.BorderSizePixel = 0
+    merchantSpeedFill.Parent = merchantSpeedTrack
+
+    local merchantFillCorner = Instance.new("UICorner")
+    merchantFillCorner.CornerRadius = UDim.new(0, 6)
+    merchantFillCorner.Parent = merchantSpeedFill
+
+    local merchantSpeedKnob = Instance.new("Frame")
+    merchantSpeedKnob.Name = "Knob"
+    merchantSpeedKnob.Size = UDim2.new(0, 16, 0, 16)
+    merchantSpeedKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+    merchantSpeedKnob.Position = UDim2.new(0, 0, 0.5, 0)
+    merchantSpeedKnob.BackgroundColor3 = Color3.fromRGB(251, 240, 228)
+    merchantSpeedKnob.BorderSizePixel = 0
+    merchantSpeedKnob.Active = true
+    merchantSpeedKnob.Parent = merchantSpeedTrack
+
+    local merchantKnobCorner = Instance.new("UICorner")
+    merchantKnobCorner.CornerRadius = UDim.new(1, 0)
+    merchantKnobCorner.Parent = merchantSpeedKnob
+
+    local function speedToRatio(speed)
+        return (speed - MIN_FLY_SPEED) / (MAX_FLY_SPEED - MIN_FLY_SPEED)
+    end
+
+    local function setSpeedFromRatio(ratio)
+        local clamped = ratio
+        if clamped < 0 then
+            clamped = 0
+        elseif clamped > 1 then
+            clamped = 1
+        end
+        local speed = MIN_FLY_SPEED + (MAX_FLY_SPEED - MIN_FLY_SPEED) * clamped
+        STATE.flySpeed = math.floor(speed + 0.5)
+    end
+
+    local function updateSliderVisuals()
+        local ratio = speedToRatio(STATE.flySpeed)
+        flySpeedFill.Size = UDim2.new(ratio, 0, 1, 0)
+        flySpeedKnob.Position = UDim2.new(ratio, 0, 0.5, 0)
+    end
+
+    local function setSpeedFromPointerX(pointerX)
+        local left = flySpeedTrack.AbsolutePosition.X
+        local width = flySpeedTrack.AbsoluteSize.X
+        if width <= 0 then
+            return
+        end
+
+        local ratio = (pointerX - left) / width
+        setSpeedFromRatio(ratio)
+        refreshUiIfReady()
+    end
+
+    local function merchantSpeedToRatio(speed)
+        return (speed - MIN_MERCHANT_SLIDE_SPEED) / (MAX_MERCHANT_SLIDE_SPEED - MIN_MERCHANT_SLIDE_SPEED)
+    end
+
+    local function setMerchantSpeedFromRatio(ratio)
+        local clamped = ratio
+        if clamped < 0 then
+            clamped = 0
+        elseif clamped > 1 then
+            clamped = 1
+        end
+        local speed = MIN_MERCHANT_SLIDE_SPEED + (MAX_MERCHANT_SLIDE_SPEED - MIN_MERCHANT_SLIDE_SPEED) * clamped
+        STATE.merchantSlideSpeed = math.floor(speed + 0.5)
+    end
+
+    local function updateMerchantSliderVisuals()
+        local ratio = merchantSpeedToRatio(getMerchantSlideSpeed())
+        merchantSpeedFill.Size = UDim2.new(ratio, 0, 1, 0)
+        merchantSpeedKnob.Position = UDim2.new(ratio, 0, 0.5, 0)
+    end
+
+    local function setMerchantSpeedFromPointerX(pointerX)
+        local left = merchantSpeedTrack.AbsolutePosition.X
+        local width = merchantSpeedTrack.AbsoluteSize.X
+        if width <= 0 then
+            return
+        end
+
+        local ratio = (pointerX - left) / width
+        setMerchantSpeedFromRatio(ratio)
+        refreshUiIfReady()
+    end
+
+    local draggingWindow = false
+    local dragStart
+    local startPos
+
+    local draggingSpeedSlider = false
+    local draggingMerchantSpeedSlider = false
+
+    local function isPointInsideGuiObject(guiObject, point)
+        if not guiObject or not guiObject.Visible then
+            return false
+        end
+        local position = guiObject.AbsolutePosition
+        local size = guiObject.AbsoluteSize
+        local x = point.X
+        local y = point.Y
+        return x >= position.X
+            and x <= position.X + size.X
+            and y >= position.Y
+            and y <= position.Y + size.Y
+    end
+
+    local function getOreSetForMode(mode)
+        if mode == "unlock" then
+            return STATE.autoUnlockOreSet
+        end
+        return STATE.autoLockOreSet
+    end
+
+    local function rebuildOreOptionButtonsForMode(mode, optionButtons, targetScroll)
+        local availableOptions = getAvailableOreOptions()
+        local keep = {}
+
+        for index, oreName in ipairs(availableOptions) do
+            local _, oreKey = rememberOreDisplay(oreName)
+            if oreKey then
+                keep[oreKey] = true
+
+                local oreOptionButton = optionButtons[oreKey]
+                if not oreOptionButton then
+                    oreOptionButton = Instance.new("TextButton")
+                    oreOptionButton.Name = string.format("OreOption_%s_%s", mode, string.gsub(oreKey, "[^%w_]", "_"))
+                    oreOptionButton.Size = UDim2.new(1, -4, 0, 24)
+                    oreOptionButton.BackgroundColor3 = Color3.fromRGB(56, 63, 78)
+                    oreOptionButton.BorderSizePixel = 0
+                    oreOptionButton.Font = Enum.Font.Gotham
+                    oreOptionButton.TextSize = 12
+                    oreOptionButton.TextColor3 = Color3.new(1, 1, 1)
+                    oreOptionButton.TextXAlignment = Enum.TextXAlignment.Left
+                    oreOptionButton.ZIndex = 10
+                    oreOptionButton.Parent = targetScroll
+
+                    local optionCorner = Instance.new("UICorner")
+                    optionCorner.CornerRadius = UDim.new(0, 5)
+                    optionCorner.Parent = oreOptionButton
+
+                    oreOptionButton.MouseButton1Click:Connect(function()
+                        local targetSet = getOreSetForMode(mode)
+                        if targetSet[oreKey] then
+                            targetSet[oreKey] = nil
+                        else
+                            targetSet[oreKey] = true
+                        end
+                        refreshUiIfReady()
+                    end)
+
+                    optionButtons[oreKey] = oreOptionButton
+                end
+
+                oreOptionButton.LayoutOrder = index
+                oreOptionButton:SetAttribute("OreDisplay", oreName)
+            end
+        end
+
+        for oreKey, optionButton in pairs(optionButtons) do
+            if not keep[oreKey] then
+                optionButton:Destroy()
+                optionButtons[oreKey] = nil
+            end
+        end
+    end
+
+    local function tryAddCustomOre()
+        local addMode = "lock"
+        if STATE.showUnlockOreDropdown and not STATE.showLockOreDropdown then
+            addMode = "unlock"
+        elseif (not STATE.showLockOreDropdown and not STATE.showUnlockOreDropdown) and STATE.autoUnlockEnabled and not STATE.autoLockEnabled then
+            addMode = "unlock"
+        end
+
+        local okAdd, result = addCustomOreName(customOreInput.Text or "", addMode)
+        if not okAdd then
+            status.Text = "Status: " .. result
+            return
+        end
+
+        customOreInput.Text = ""
+        if not STATE.showLockOreDropdown and not STATE.showUnlockOreDropdown then
+            if addMode == "unlock" then
+                STATE.showUnlockOreDropdown = true
+            else
+                STATE.showLockOreDropdown = true
+            end
+        end
+        rebuildOreOptionButtonsForMode("lock", lockOreOptionButtons, lockOreScroll)
+        rebuildOreOptionButtonsForMode("unlock", unlockOreOptionButtons, unlockOreScroll)
+        refreshUi()
+        status.Text = string.format("Status: Added ore %s (%s list)", tostring(result), addMode == "unlock" and "unlock" or "lock")
+    end
+
+    local function refreshOreOptionButtonsForMode(mode, optionButtons)
+        local targetSet = getOreSetForMode(mode)
+        local selectedColor = mode == "unlock" and Color3.fromRGB(143, 104, 56) or Color3.fromRGB(60, 118, 75)
+
+        for oreKey, optionButton in pairs(optionButtons) do
+            if optionButton and optionButton.Parent then
+                local oreDisplay = optionButton:GetAttribute("OreDisplay") or STATE.oreDisplayByKey[oreKey] or oreKey
+                local selected = targetSet[oreKey] == true
+                optionButton.Text = string.format("  [%s] %s", selected and "x" or " ", oreDisplay)
+                optionButton.BackgroundColor3 = selected and selectedColor or Color3.fromRGB(56, 63, 78)
+            end
+        end
+    end
+
+    lockOreListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        lockOreScroll.CanvasSize = UDim2.new(0, 0, 0, lockOreListLayout.AbsoluteContentSize.Y + 4)
+    end)
+
+    unlockOreListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        unlockOreScroll.CanvasSize = UDim2.new(0, 0, 0, unlockOreListLayout.AbsoluteContentSize.Y + 4)
+    end)
+
+    rebuildOreOptionButtonsForMode("lock", lockOreOptionButtons, lockOreScroll)
+    rebuildOreOptionButtonsForMode("unlock", unlockOreOptionButtons, unlockOreScroll)
+    lockOreScroll.CanvasSize = UDim2.new(0, 0, 0, lockOreListLayout.AbsoluteContentSize.Y + 4)
+    unlockOreScroll.CanvasSize = UDim2.new(0, 0, 0, unlockOreListLayout.AbsoluteContentSize.Y + 4)
+
+    local function refreshUi()
+        if STATE.pausedForMerchant then
+            toggleButton.Text = "Autofarm: MERCHANT"
+            toggleButton.BackgroundColor3 = Color3.fromRGB(171, 122, 52)
+        elseif STATE.running then
+            toggleButton.Text = "Autofarm: ON"
+            toggleButton.BackgroundColor3 = Color3.fromRGB(44, 130, 72)
+        else
+            toggleButton.Text = "Autofarm: OFF"
+            toggleButton.BackgroundColor3 = Color3.fromRGB(135, 49, 49)
+        end
+
+        if STATE.autoSell then
+            autoSellButton.Text = "AutoSell: ON"
+            autoSellButton.BackgroundColor3 = Color3.fromRGB(44, 130, 72)
+        else
+            autoSellButton.Text = "AutoSell: OFF"
+            autoSellButton.BackgroundColor3 = Color3.fromRGB(135, 49, 49)
+        end
+
+        if STATE.autoLockEnabled then
+            autoLockToggleButton.Text = "AutoLock Ores: ON"
+            autoLockToggleButton.BackgroundColor3 = Color3.fromRGB(44, 130, 72)
+        else
+            autoLockToggleButton.Text = "AutoLock Ores: OFF"
+            autoLockToggleButton.BackgroundColor3 = Color3.fromRGB(135, 49, 49)
+        end
+
+        if STATE.autoUnlockEnabled then
+            autoUnlockToggleButton.Text = "AutoUnlock Ores: ON"
+            autoUnlockToggleButton.BackgroundColor3 = Color3.fromRGB(44, 130, 72)
+        else
+            autoUnlockToggleButton.Text = "AutoUnlock Ores: OFF"
+            autoUnlockToggleButton.BackgroundColor3 = Color3.fromRGB(135, 49, 49)
+        end
+
+        lockOreDropdownButton.Text = "  Lock Ores: " .. formatSelectedAutoLockOreSummary() .. (STATE.showLockOreDropdown and "  ^" or "  v")
+        unlockOreDropdownButton.Text = "  Unlock Ores: " .. formatSelectedAutoUnlockOreSummary() .. (STATE.showUnlockOreDropdown and "  ^" or "  v")
+        lockOreDropdownFrame.Visible = STATE.showLockOreDropdown
+        unlockOreDropdownFrame.Visible = STATE.showUnlockOreDropdown
+
+        if STATE.merchantWayRecording then
+            recordMerchantWayButton.Text = "Recording..."
+            recordMerchantWayButton.BackgroundColor3 = Color3.fromRGB(44, 130, 72)
+        else
+            recordMerchantWayButton.Text = "Record Merchant Way"
+            recordMerchantWayButton.BackgroundColor3 = Color3.fromRGB(61, 111, 160)
+        end
+        stopMerchantWayButton.Text = "Stop Merchant Way"
+        stopMerchantWayButton.BackgroundColor3 = Color3.fromRGB(61, 111, 160)
+        deleteMerchantWayButton.Text = "Delete Merchant Way"
+        deleteMerchantWayButton.BackgroundColor3 = Color3.fromRGB(135, 49, 49)
+
+        if STATE.flyEnabled then
+            flyToggleButton.Text = "Fly: ON"
+            flyToggleButton.BackgroundColor3 = Color3.fromRGB(53, 116, 188)
+        else
+            flyToggleButton.Text = "Fly: OFF"
+            flyToggleButton.BackgroundColor3 = Color3.fromRGB(88, 96, 112)
+        end
+
+        flySpeedLabel.Text = string.format("Fly Speed: %d", STATE.flySpeed)
+        merchantSpeedLabel.Text = string.format("AutoSell Speed: %d", getMerchantSlideSpeed())
+
+        local autoLockStatus = ""
+        if STATE.autoLockEnabled and STATE.autoUnlockEnabled then
+            autoLockStatus = " + AutoLock + AutoUnlock"
+        elseif STATE.autoLockEnabled then
+            autoLockStatus = " + AutoLock"
+        elseif STATE.autoUnlockEnabled then
+            autoLockStatus = " + AutoUnlock"
+        end
+
+        local merchantWayStatus = ""
+        if STATE.merchantWayRecording then
+            merchantWayStatus = string.format(" + Way REC (%d)", #STATE.merchantWaypoints)
+        elseif hasRecordedMerchantWay() then
+            merchantWayStatus = string.format(" + Way (%d)", #STATE.merchantWaypoints)
+        end
+        if STATE.pausedForMerchant then
+            status.Text = "Status: Merchant trip (paused)" .. autoLockStatus .. merchantWayStatus
+        elseif STATE.running then
+            status.Text = (STATE.autoSell and "Status: Farming + Merchant AutoSell" or "Status: Farming (No AutoSell)") .. autoLockStatus .. merchantWayStatus
+        else
+            status.Text = (STATE.autoSell and "Status: Paused (Merchant AutoSell Ready)" or "Status: Paused") .. autoLockStatus .. merchantWayStatus
+        end
+
+        local nextAt = STATE.nextMerchantSellAt
+        if type(nextAt) ~= "number" or nextAt <= 0 then
+            nextAt = getNowTime() + getMerchantIntervalSeconds()
+        end
+
+        local remainingSeconds = nextAt - getNowTime()
+        if remainingSeconds < 0 then
+            remainingSeconds = 0
+        end
+
+        sandLabel.Text = "Sand: " .. formatPosition(STATE.sandPosition)
+        waterLabel.Text = "Water: " .. formatPosition(STATE.waterPosition)
+        shakeLabel.Text = "Shake Time: " .. formatShakeDuration()
+        merchantIntervalLabel.Text = string.format("Merchant Sell: %s | Speed: %d (next in %ds)", formatMerchantInterval(), getMerchantSlideSpeed(), math.floor(remainingSeconds + 0.5))
+        flyInfoLabel.Text = STATE.flyEnabled and "Fly State: Active" or "Fly State: Inactive"
+        panLabel.Text = "Pan: " .. tostring(STATE.activePanName)
+
+        refreshOreOptionButtonsForMode("lock", lockOreOptionButtons)
+        refreshOreOptionButtonsForMode("unlock", unlockOreOptionButtons)
+        updateSliderVisuals()
+        updateMerchantSliderVisuals()
+    end
+
+    STATE.refreshUi = refreshUi
+
+    local function syncConfigInputFields()
+        shakeInput.Text = STATE.customShakeTime and string.format("%.2f", STATE.customShakeTime) or ""
+        merchantIntervalInput.Text = string.format("%.2f", getMerchantIntervalMinutes())
+    end
+
+    syncConfigInputFields()
+
+    local startupStatusMessage = nil
+    local loadedAnyConfig = false
+
+    local okDefaultName, defaultNameOrErr = getDefaultFullConfigName()
+    if okDefaultName and defaultNameOrErr and defaultNameOrErr ~= "" then
+        local loadedDefault, loadedNameOrErr = loadFullConfig(defaultNameOrErr)
+        if loadedDefault then
+            loadedAnyConfig = true
+            startupStatusMessage = "Status: Loaded default config (" .. tostring(loadedNameOrErr) .. ")"
+        else
+            startupStatusMessage = "Status: Default config load failed (" .. tostring(loadedNameOrErr) .. ")"
+        end
+    elseif not okDefaultName then
+        startupStatusMessage = "Status: Config init failed (" .. tostring(defaultNameOrErr) .. ")"
+    else
+        local loadedLegacy = select(1, loadAutoLockConfig())
+        if loadedLegacy then
+            loadedAnyConfig = true
+            startupStatusMessage = "Status: Legacy lock config loaded"
+        end
+    end
+
+    if loadedAnyConfig then
+        rebuildOreOptionButtonsForMode("lock", lockOreOptionButtons, lockOreScroll)
+        rebuildOreOptionButtonsForMode("unlock", unlockOreOptionButtons, unlockOreScroll)
+    end
+
+    syncConfigInputFields()
+
+    if STATE.autoSell and (type(STATE.nextMerchantSellAt) ~= "number" or STATE.nextMerchantSellAt <= 0) then
+        scheduleNextMerchantSell()
+    end
+
+    refreshUi()
+
+    if startupStatusMessage then
+        status.Text = startupStatusMessage
+    end
+
+    toggleButton.MouseButton1Click:Connect(function()
+        if STATE.pausedForMerchant then
+            return
+        end
+        STATE.running = not STATE.running
+        refreshUi()
+    end)
+
+    autoSellButton.MouseButton1Click:Connect(function()
+        STATE.autoSell = not STATE.autoSell
+        if STATE.autoSell then
+            STATE.lastMerchantSellAt = 0
+            scheduleNextMerchantSell()
+        else
+            STATE.nextMerchantSellAt = 0
+        end
+        refreshUi()
+    end)
+
+    autoLockToggleButton.MouseButton1Click:Connect(function()
+        STATE.autoLockEnabled = not STATE.autoLockEnabled
+        if STATE.autoLockEnabled then
+            STATE.autoUnlockEnabled = false
+        end
+        STATE.autoLockRetryByTool = {}
+        STATE.autoUnlockRetryByTool = {}
+        refreshUi()
+    end)
+
+    autoUnlockToggleButton.MouseButton1Click:Connect(function()
+        STATE.autoUnlockEnabled = not STATE.autoUnlockEnabled
+        if STATE.autoUnlockEnabled then
+            STATE.autoLockEnabled = false
+        end
+        STATE.autoLockRetryByTool = {}
+        STATE.autoUnlockRetryByTool = {}
+        refreshUi()
+    end)
+
+    saveLockButton.MouseButton1Click:Connect(function()
+        local targetName = "default"
+        local okDefault, defaultNameOrErr = getDefaultFullConfigName()
+        if okDefault and defaultNameOrErr and defaultNameOrErr ~= "" then
+            targetName = defaultNameOrErr
+        end
+
+        local saved, saveMsg = saveFullConfig(targetName)
+        if saved then
+            pcall(setDefaultFullConfigName, saveMsg)
+            status.Text = "Status: Config saved (" .. tostring(saveMsg) .. ")"
+            return
+        end
+
+        local savedLegacy, saveLegacyMsg = saveAutoLockConfig()
+        if savedLegacy then
+            status.Text = "Status: Legacy lock config saved"
+        else
+            status.Text = "Status: Save failed (" .. tostring(saveMsg) .. " / " .. tostring(saveLegacyMsg) .. ")"
+        end
+    end)
+
+    loadLockButton.MouseButton1Click:Connect(function()
+        local targetName = nil
+        local okDefault, defaultNameOrErr = getDefaultFullConfigName()
+        if okDefault then
+            targetName = defaultNameOrErr
+        end
+        if not targetName or targetName == "" then
+            targetName = "default"
+        end
+
+        local loaded, loadMsg = loadFullConfig(targetName)
+        if loaded then
+            rebuildOreOptionButtonsForMode("lock", lockOreOptionButtons, lockOreScroll)
+            rebuildOreOptionButtonsForMode("unlock", unlockOreOptionButtons, unlockOreScroll)
+            syncConfigInputFields()
+            refreshUi()
+            status.Text = "Status: Config loaded (" .. tostring(loadMsg) .. ")"
+            return
+        end
+
+        local loadedLegacy, loadLegacyMsg = loadAutoLockConfig()
+        if loadedLegacy then
+            rebuildOreOptionButtonsForMode("lock", lockOreOptionButtons, lockOreScroll)
+            rebuildOreOptionButtonsForMode("unlock", unlockOreOptionButtons, unlockOreScroll)
+            refreshUi()
+            status.Text = "Status: Legacy lock config loaded"
+        else
+            status.Text = "Status: Load failed (" .. tostring(loadMsg) .. " / " .. tostring(loadLegacyMsg) .. ")"
+        end
+    end)
+
+    lockOreDropdownButton.MouseButton1Click:Connect(function()
+        STATE.showLockOreDropdown = not STATE.showLockOreDropdown
+        if STATE.showLockOreDropdown then
+            STATE.showUnlockOreDropdown = false
+            rebuildOreOptionButtonsForMode("lock", lockOreOptionButtons, lockOreScroll)
+        end
+        refreshUi()
+    end)
+
+    unlockOreDropdownButton.MouseButton1Click:Connect(function()
+        STATE.showUnlockOreDropdown = not STATE.showUnlockOreDropdown
+        if STATE.showUnlockOreDropdown then
+            STATE.showLockOreDropdown = false
+            rebuildOreOptionButtonsForMode("unlock", unlockOreOptionButtons, unlockOreScroll)
+        end
+        refreshUi()
+    end)
+
+    recordMerchantWayButton.MouseButton1Click:Connect(function()
+        local okRecord, recordMsg = startMerchantWayRecording()
+        refreshUi()
+        status.Text = "Status: " .. tostring(recordMsg)
+    end)
+
+    stopMerchantWayButton.MouseButton1Click:Connect(function()
+        local okStop, stopMsg = stopMerchantWayRecording()
+        refreshUi()
+        status.Text = "Status: " .. tostring(stopMsg)
+    end)
+
+    deleteMerchantWayButton.MouseButton1Click:Connect(function()
+        local _, deleteMsg = deleteMerchantWay()
+        refreshUi()
+        status.Text = "Status: " .. tostring(deleteMsg)
+    end)
+
+    addOreButton.MouseButton1Click:Connect(function()
+        tryAddCustomOre()
+    end)
+
+    customOreInput.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            tryAddCustomOre()
+        end
+    end)
+
+    flyToggleButton.MouseButton1Click:Connect(function()
+        STATE.flyEnabled = not STATE.flyEnabled
+        if not STATE.flyEnabled then
+            STATE.flyTargetPosition = nil
+        end
+        refreshUi()
+    end)
+
+    shakeInput.FocusLost:Connect(function()
+        local raw = shakeInput.Text or ""
+        local cleaned = string.match(string.gsub(raw, ",", "."), "^%s*(.-)%s*$")
+
+        if cleaned == "" then
+            STATE.customShakeTime = nil
+            refreshUi()
+            return
+        end
+
+        local parsed = tonumber(cleaned)
+        if not parsed then
+            shakeInput.Text = STATE.customShakeTime and string.format("%.2f", STATE.customShakeTime) or ""
+            status.Text = "Status: Invalid shake time"
+            return
+        end
+
+        if parsed < MIN_CUSTOM_SHAKE_TIME then
+            parsed = MIN_CUSTOM_SHAKE_TIME
+        elseif parsed > MAX_CUSTOM_SHAKE_TIME then
+            parsed = MAX_CUSTOM_SHAKE_TIME
+        end
+
+        STATE.customShakeTime = parsed
+        shakeInput.Text = string.format("%.2f", parsed)
+        refreshUi()
+    end)
+
+    merchantIntervalInput.FocusLost:Connect(function()
+        local raw = merchantIntervalInput.Text or ""
+        local cleaned = string.match(string.gsub(raw, ",", "."), "^%s*(.-)%s*$")
+
+        if cleaned == "" then
+            STATE.merchantIntervalMinutes = DEFAULT_MERCHANT_INTERVAL_MINUTES
+            if STATE.autoSell then
+                scheduleNextMerchantSell()
+            else
+                STATE.nextMerchantSellAt = 0
+            end
+            merchantIntervalInput.Text = string.format("%.2f", STATE.merchantIntervalMinutes)
+            refreshUi()
+            return
+        end
+
+        local parsed = tonumber(cleaned)
+        if not parsed then
+            merchantIntervalInput.Text = string.format("%.2f", getMerchantIntervalMinutes())
+            status.Text = "Status: Invalid merchant interval"
+            return
+        end
+
+        if parsed < MIN_MERCHANT_INTERVAL_MINUTES then
+            parsed = MIN_MERCHANT_INTERVAL_MINUTES
+        elseif parsed > MAX_MERCHANT_INTERVAL_MINUTES then
+            parsed = MAX_MERCHANT_INTERVAL_MINUTES
+        end
+
+        STATE.merchantIntervalMinutes = parsed
+        if STATE.autoSell then
+            scheduleNextMerchantSell()
+        else
+            STATE.nextMerchantSellAt = 0
+        end
+        merchantIntervalInput.Text = string.format("%.2f", parsed)
+        refreshUi()
+    end)
+
+    setSandButton.MouseButton1Click:Connect(function()
+        local position = getCurrentPosition()
+        if position then
+            STATE.sandPosition = position
+            refreshUi()
+        else
+            status.Text = "Status: Spawn first to set zones"
+        end
+    end)
+
+    setWaterButton.MouseButton1Click:Connect(function()
+        local position = getCurrentPosition()
+        if position then
+            STATE.waterPosition = position
+            refreshUi()
+        else
+            status.Text = "Status: Spawn first to set zones"
+        end
+    end)
+
+    closeButton.MouseButton1Click:Connect(function()
+        stopThisInstance()
+    end)
+
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingWindow = true
+            dragStart = input.Position
+            startPos = frame.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    draggingWindow = false
+                end
+            end)
+        end
+    end)
+
+    flySpeedTrack.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSpeedSlider = true
+            setSpeedFromPointerX(input.Position.X)
+        end
+    end)
+
+    flySpeedKnob.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSpeedSlider = true
+            setSpeedFromPointerX(input.Position.X)
+        end
+    end)
+
+    merchantSpeedTrack.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingMerchantSpeedSlider = true
+            setMerchantSpeedFromPointerX(input.Position.X)
+        end
+    end)
+
+    merchantSpeedKnob.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingMerchantSpeedSlider = true
+            setMerchantSpeedFromPointerX(input.Position.X)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingWindow and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+
+        if draggingSpeedSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            setSpeedFromPointerX(input.Position.X)
+        end
+
+        if draggingMerchantSpeedSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            setMerchantSpeedFromPointerX(input.Position.X)
+        end
+    end)
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+        if STATE.closed or gameProcessedEvent then
+            return
+        end
+
+        local inputType = input.UserInputType
+        if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then
+            return
+        end
+
+        if not STATE.showLockOreDropdown and not STATE.showUnlockOreDropdown then
+            return
+        end
+
+        local point = input.Position
+        local clickedInsideDropdownUi = isPointInsideGuiObject(lockOreDropdownButton, point)
+            or isPointInsideGuiObject(unlockOreDropdownButton, point)
+            or isPointInsideGuiObject(lockOreDropdownFrame, point)
+            or isPointInsideGuiObject(unlockOreDropdownFrame, point)
+
+        if not clickedInsideDropdownUi then
+            STATE.showLockOreDropdown = false
+            STATE.showUnlockOreDropdown = false
+            refreshUi()
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSpeedSlider = false
+            draggingMerchantSpeedSlider = false
+        end
+    end)
+end
+
+local function createBracketGui()
+    if type(loadstring) ~= "function" then
+        error("loadstring API not available")
+    end
+
+    local okFetch, source = pcall(function()
+        return game:HttpGet(BRACKET_UI_URL)
+    end)
+    if not okFetch or type(source) ~= "string" or source == "" then
+        error("Failed to fetch Bracket UI source")
+    end
+
+    local chunk, compileErr = loadstring(source)
+    if type(chunk) ~= "function" then
+        error("Bracket UI compile failed: " .. tostring(compileErr))
+    end
+
+    local okBracket, Bracket = pcall(chunk)
+    if not okBracket or type(Bracket) ~= "table" or type(Bracket.Window) ~= "function" then
+        error("Bracket UI runtime failed")
+    end
+
+    local Window = Bracket:Window({
+        Name = "Focus",
+        Enabled = true,
+        Color = Color3.fromRGB(255, 128, 64),
+        Size = UDim2.new(0, 600, 0, 560),
+        Position = UDim2.new(0.5, -300, 0.5, -280)
+    })
+
+    STATE.bracketScreen = Bracket.ScreenAsset
+    if sharedEnv then
+        sharedEnv.FocusGoldFarmBracketScreen = Bracket.ScreenAsset
+    end
+
+    local farmTab = Window:Tab({ Name = "Farm" })
+    local merchantTab = Window:Tab({ Name = "Merchant" })
+    local oresTab = Window:Tab({ Name = "Ores" })
+    local movementTab = Window:Tab({ Name = "Movement" })
+    local configTab = Window:Tab({ Name = "Config" })
+    local infoTab = Window:Tab({ Name = "Info" })
+
+    local suppressUiCallbacks = false
+    local lastMessage = "Ready"
+
+    local autoFarmToggle
+    local autoSellToggle
+    local autoLockToggle
+    local autoUnlockToggle
+    local flyToggle
+    local flySpeedSlider
+    local merchantSpeedSlider
+    local shakeTextbox
+    local merchantIntervalTextbox
+    local lockOreDropdown
+    local unlockOreDropdown
+
+    local statusLabel
+    local messageLabel
+    local sandLabel
+    local waterLabel
+    local shakeLabel
+    local merchantLabel
+    local flyLabel
+    local panLabel
+    local lockSummaryLabel
+    local unlockSummaryLabel
+    local wayLabel
+    local configNameTextbox
+    local configDropdown
+    local defaultConfigLabel
+    local selectedConfigName = nil
+    local pendingConfigName = ""
+    local cachedDefaultConfigName = nil
+
+    local function setLabelText(labelObj, text)
+        if labelObj and type(labelObj.SetText) == "function" then
+            pcall(function()
+                labelObj:SetText(text)
+            end)
+        end
+    end
+
+    local function withSuppressedCallbacks(callback)
+        suppressUiCallbacks = true
+        local ok, err = pcall(callback)
+        suppressUiCallbacks = false
+        if not ok then
+            warn("Bracket UI sync failed:", err)
+        end
+    end
+
+    local function closeBracketDropdownOverlays()
+        local screen = STATE.bracketScreen
+        if typeof(screen) ~= "Instance" or not screen.Parent then
+            return
+        end
+
+        for _, child in ipairs(screen:GetChildren()) do
+            if child.Name == "OptionContainer" and (child:IsA("Frame") or child:IsA("ScrollingFrame")) then
+                child.Visible = false
+            end
+        end
+    end
+
+    local function isInsideBracketDropdownGui(guiObject)
+        local screen = STATE.bracketScreen
+        if typeof(screen) ~= "Instance" then
+            return false
+        end
+
+        local cursor = guiObject
+        while typeof(cursor) == "Instance" do
+            if cursor == screen then
+                break
+            end
+            if cursor.Name == "Dropdown" or cursor.Name == "OptionContainer" then
+                return true
+            end
+            cursor = cursor.Parent
+        end
+
+        return false
+    end
+
+    local function getTargetOreSetForMode(mode)
+        if mode == "unlock" then
+            return STATE.autoUnlockOreSet
+        end
+        return STATE.autoLockOreSet
+    end
+
+    local function buildOreDropdownList(mode)
+        local list = {}
+        local targetSet = getTargetOreSetForMode(mode)
+
+        for _, oreName in ipairs(getAvailableOreOptions()) do
+            local display, oreKey = rememberOreDisplay(oreName)
+            if oreKey then
+                list[#list + 1] = {
+                    Name = display,
+                    Mode = "Toggle",
+                    Value = targetSet[oreKey] == true,
+                    Callback = function(_, option)
+                        if suppressUiCallbacks then
+                            return
+                        end
+
+                        if option and option.Value then
+                            targetSet[oreKey] = true
+                        else
+                            targetSet[oreKey] = nil
+                        end
+                        closeBracketDropdownOverlays()
+                        refreshUiIfReady()
+                    end
+                }
+            end
+        end
+
+        return list
+    end
+
+    local function rebuildOreDropdowns()
+        if lockOreDropdown and type(lockOreDropdown.Clear) == "function" and type(lockOreDropdown.BulkAdd) == "function" then
+            lockOreDropdown:Clear()
+            lockOreDropdown:BulkAdd(buildOreDropdownList("lock"))
+        end
+
+        if unlockOreDropdown and type(unlockOreDropdown.Clear) == "function" and type(unlockOreDropdown.BulkAdd) == "function" then
+            unlockOreDropdown:Clear()
+            unlockOreDropdown:BulkAdd(buildOreDropdownList("unlock"))
+        end
+    end
+
+    local function pushMessage(message)
+        lastMessage = tostring(message or "Ready")
+        refreshUiIfReady()
+    end
+
+    local function resolveConfigName()
+        local candidate = string.match(tostring(pendingConfigName or ""), "^%s*(.-)%s*$")
+        if not candidate or candidate == "" then
+            candidate = selectedConfigName
+        end
+        if not candidate or candidate == "" then
+            local okDefault, defaultName = getDefaultFullConfigName()
+            if okDefault and defaultName and defaultName ~= "" then
+                cachedDefaultConfigName = defaultName
+                candidate = defaultName
+            end
+        end
+        return sanitizeConfigName(candidate or "default")
+    end
+
+    local function buildConfigDropdownList()
+        local okList, namesOrErr = listFullConfigNames()
+        if not okList then
+            return nil, tostring(namesOrErr)
+        end
+
+        local names = namesOrErr or {}
+        local list = {}
+        for _, configName in ipairs(names) do
+            local thisName = tostring(configName)
+            list[#list + 1] = {
+                Name = thisName,
+                Mode = "Button",
+                Value = selectedConfigName == thisName,
+                Callback = function(_, option)
+                    if suppressUiCallbacks then
+                        return
+                    end
+                    selectedConfigName = (type(option) == "table" and option.Name) or thisName
+                    pendingConfigName = selectedConfigName or ""
+                    closeBracketDropdownOverlays()
+                    refreshUiIfReady()
+                end
+            }
+        end
+        return list, nil
+    end
+
+    local function rebuildConfigDropdown()
+        if not configDropdown then
+            return false, "Config dropdown not ready"
+        end
+
+        local list, listErr = buildConfigDropdownList()
+        if not list then
+            return false, listErr
+        end
+
+        withSuppressedCallbacks(function()
+            configDropdown:Clear()
+            configDropdown:BulkAdd(list)
+        end)
+
+        local hasSelected = false
+        for _, option in ipairs(list) do
+            if option.Name == selectedConfigName then
+                hasSelected = true
+                break
+            end
+        end
+
+        if not hasSelected then
+            if #list > 0 then
+                selectedConfigName = list[1].Name
+            else
+                selectedConfigName = nil
+            end
+        end
+
+        withSuppressedCallbacks(function()
+            if selectedConfigName and selectedConfigName ~= "" then
+                configDropdown:SetValue({ selectedConfigName })
+            else
+                configDropdown:SetValue({})
+            end
+        end)
+
+        return true
+    end
+
+    farmTab:Divider({ Text = "Core", Side = "Left" })
+
+    autoFarmToggle = farmTab:Toggle({
+        Name = "Autofarm",
+        Side = "Left",
+        Value = STATE.running,
+        Callback = function(enabled)
+            if suppressUiCallbacks then
+                return
+            end
+            if STATE.pausedForMerchant then
+                pushMessage("Merchant trip active, wait until finished")
+                refreshUiIfReady()
+                return
+            end
+            STATE.running = enabled
+            refreshUiIfReady()
+        end
+    })
+
+    autoSellToggle = farmTab:Toggle({
+        Name = "AutoSell",
+        Side = "Left",
+        Value = STATE.autoSell,
+        Callback = function(enabled)
+            if suppressUiCallbacks then
+                return
+            end
+            STATE.autoSell = enabled
+            if enabled then
+                STATE.lastMerchantSellAt = 0
+                scheduleNextMerchantSell()
+            else
+                STATE.nextMerchantSellAt = 0
+            end
+            refreshUiIfReady()
+        end
+    })
+
+    shakeTextbox = farmTab:Textbox({
+        Name = "Shake Seconds",
+        Side = "Left",
+        Value = STATE.customShakeTime and string.format("%.2f", STATE.customShakeTime) or "",
+        Placeholder = "0.25 - 30, empty = default",
+        NumbersOnly = false,
+        AutoClear = false,
+        Callback = function(text)
+            if suppressUiCallbacks then
+                return
+            end
+
+            local cleaned = string.match(string.gsub(tostring(text or ""), ",", "."), "^%s*(.-)%s*$")
+            if cleaned == "" then
+                STATE.customShakeTime = nil
+                refreshUiIfReady()
+                return
+            end
+
+            local parsed = tonumber(cleaned)
+            if not parsed then
+                pushMessage("Invalid shake time")
+                refreshUiIfReady()
+                return
+            end
+
+            if parsed < MIN_CUSTOM_SHAKE_TIME then
+                parsed = MIN_CUSTOM_SHAKE_TIME
+            elseif parsed > MAX_CUSTOM_SHAKE_TIME then
+                parsed = MAX_CUSTOM_SHAKE_TIME
+            end
+
+            STATE.customShakeTime = parsed
+            refreshUiIfReady()
+        end
+    })
+
+    farmTab:Button({
+        Name = "Use Default Shake",
+        Side = "Left",
+        Callback = function()
+            STATE.customShakeTime = nil
+            pushMessage("Shake time reset to default")
+        end
+    })
+
+    farmTab:Button({
+        Name = "Set Sand Here",
+        Side = "Left",
+        Callback = function()
+            local position = getCurrentPosition()
+            if position then
+                STATE.sandPosition = position
+                pushMessage("Sand position updated")
+            else
+                pushMessage("Spawn first to set sand")
+            end
+        end
+    })
+
+    farmTab:Button({
+        Name = "Set Water Here",
+        Side = "Left",
+        Callback = function()
+            local position = getCurrentPosition()
+            if position then
+                STATE.waterPosition = position
+                pushMessage("Water position updated")
+            else
+                pushMessage("Spawn first to set water")
+            end
+        end
+    })
+
+    merchantTab:Divider({ Text = "Merchant", Side = "Left" })
+
+    merchantIntervalTextbox = merchantTab:Textbox({
+        Name = "Merchant Interval (min)",
+        Side = "Left",
+        Value = string.format("%.2f", getMerchantIntervalMinutes()),
+        Placeholder = "0.1 - 120",
+        NumbersOnly = false,
+        AutoClear = false,
+        Callback = function(text)
+            if suppressUiCallbacks then
+                return
+            end
+
+            local cleaned = string.match(string.gsub(tostring(text or ""), ",", "."), "^%s*(.-)%s*$")
+            if cleaned == "" then
+                STATE.merchantIntervalMinutes = DEFAULT_MERCHANT_INTERVAL_MINUTES
+                if STATE.autoSell then
+                    scheduleNextMerchantSell()
+                else
+                    STATE.nextMerchantSellAt = 0
+                end
+                refreshUiIfReady()
+                return
+            end
+
+            local parsed = tonumber(cleaned)
+            if not parsed then
+                pushMessage("Invalid merchant interval")
+                refreshUiIfReady()
+                return
+            end
+
+            if parsed < MIN_MERCHANT_INTERVAL_MINUTES then
+                parsed = MIN_MERCHANT_INTERVAL_MINUTES
+            elseif parsed > MAX_MERCHANT_INTERVAL_MINUTES then
+                parsed = MAX_MERCHANT_INTERVAL_MINUTES
+            end
+
+            STATE.merchantIntervalMinutes = parsed
+            if STATE.autoSell then
+                scheduleNextMerchantSell()
+            else
+                STATE.nextMerchantSellAt = 0
+            end
+            refreshUiIfReady()
+        end
+    })
+
+    merchantSpeedSlider = merchantTab:Slider({
+        Name = "AutoSell Move Speed",
+        Side = "Left",
+        Min = MIN_MERCHANT_SLIDE_SPEED,
+        Max = MAX_MERCHANT_SLIDE_SPEED,
+        Value = getMerchantSlideSpeed(),
+        Precise = 0,
+        Unit = "",
+        Callback = function(number)
+            if suppressUiCallbacks then
+                return
+            end
+            local parsed = tonumber(number)
+            if not parsed then
+                return
+            end
+            if parsed < MIN_MERCHANT_SLIDE_SPEED then
+                parsed = MIN_MERCHANT_SLIDE_SPEED
+            elseif parsed > MAX_MERCHANT_SLIDE_SPEED then
+                parsed = MAX_MERCHANT_SLIDE_SPEED
+            end
+            STATE.merchantSlideSpeed = math.floor(parsed + 0.5)
+            refreshUiIfReady()
+        end
+    })
+
+    merchantTab:Button({
+        Name = "Record Merchant Way",
+        Side = "Left",
+        Callback = function()
+            local _, msg = startMerchantWayRecording()
+            pushMessage(msg)
+        end
+    })
+
+    merchantTab:Button({
+        Name = "Stop Merchant Way",
+        Side = "Left",
+        Callback = function()
+            local _, msg = stopMerchantWayRecording()
+            pushMessage(msg)
+        end
+    })
+
+    merchantTab:Button({
+        Name = "Delete Merchant Way",
+        Side = "Left",
+        Callback = function()
+            local _, msg = deleteMerchantWay()
+            pushMessage(msg)
+        end
+    })
+
+    oresTab:Divider({ Text = "AutoLock / AutoUnlock", Side = "Left" })
+
+    autoLockToggle = oresTab:Toggle({
+        Name = "AutoLock Ores",
+        Side = "Left",
+        Value = STATE.autoLockEnabled,
+        Callback = function(enabled)
+            if suppressUiCallbacks then
+                return
+            end
+            STATE.autoLockEnabled = enabled
+            if enabled then
+                STATE.autoUnlockEnabled = false
+            end
+            STATE.autoLockRetryByTool = {}
+            STATE.autoUnlockRetryByTool = {}
+            refreshUiIfReady()
+        end
+    })
+
+    autoUnlockToggle = oresTab:Toggle({
+        Name = "AutoUnlock Ores",
+        Side = "Left",
+        Value = STATE.autoUnlockEnabled,
+        Callback = function(enabled)
+            if suppressUiCallbacks then
+                return
+            end
+            STATE.autoUnlockEnabled = enabled
+            if enabled then
+                STATE.autoLockEnabled = false
+            end
+            STATE.autoLockRetryByTool = {}
+            STATE.autoUnlockRetryByTool = {}
+            refreshUiIfReady()
+        end
+    })
+
+    lockOreDropdown = oresTab:Dropdown({
+        Name = "Lock Ores",
+        Side = "Left",
+        List = buildOreDropdownList("lock")
+    })
+
+    unlockOreDropdown = oresTab:Dropdown({
+        Name = "Unlock Ores",
+        Side = "Left",
+        List = buildOreDropdownList("unlock")
+    })
+
+    oresTab:Textbox({
+        Name = "Add Custom Ore",
+        Side = "Left",
+        Value = "",
+        Placeholder = "Type ore and press Enter",
+        NumbersOnly = false,
+        AutoClear = true,
+        Callback = function(text)
+            if suppressUiCallbacks then
+                return
+            end
+            local addMode = (STATE.autoUnlockEnabled and not STATE.autoLockEnabled) and "unlock" or "lock"
+            local okAdd, result = addCustomOreName(text, addMode)
+            if not okAdd then
+                pushMessage(result)
+                return
+            end
+            rebuildOreDropdowns()
+            pushMessage(string.format("Added ore %s (%s list)", tostring(result), addMode))
+            refreshUiIfReady()
+        end
+    })
+
+    oresTab:Button({
+        Name = "Refresh Ore Lists",
+        Side = "Left",
+        Callback = function()
+            rebuildOreDropdowns()
+            pushMessage("Ore lists refreshed")
+            refreshUiIfReady()
+        end
+    })
+
+    oresTab:Button({
+        Name = "Save Ores Only (Legacy)",
+        Side = "Left",
+        Callback = function()
+            local saved, msg = saveAutoLockConfig()
+            if saved then
+                pushMessage("Lock config saved")
+            else
+                pushMessage("Save failed (" .. tostring(msg) .. ")")
+            end
+        end
+    })
+
+    oresTab:Button({
+        Name = "Load Ores Only (Legacy)",
+        Side = "Left",
+        Callback = function()
+            local loaded, msg = loadAutoLockConfig()
+            if loaded then
+                rebuildOreDropdowns()
+                pushMessage("Lock config loaded")
+                refreshUiIfReady()
+            else
+                pushMessage("Load failed (" .. tostring(msg) .. ")")
+            end
+        end
+    })
+
+    movementTab:Divider({ Text = "Fly", Side = "Left" })
+
+    flyToggle = movementTab:Toggle({
+        Name = "Position Fly",
+        Side = "Left",
+        Value = STATE.flyEnabled,
+        Callback = function(enabled)
+            if suppressUiCallbacks then
+                return
+            end
+            STATE.flyEnabled = enabled
+            if not enabled then
+                STATE.flyTargetPosition = nil
+            end
+            refreshUiIfReady()
+        end
+    })
+
+    flySpeedSlider = movementTab:Slider({
+        Name = "Fly Speed",
+        Side = "Left",
+        Min = MIN_FLY_SPEED,
+        Max = MAX_FLY_SPEED,
+        Value = STATE.flySpeed,
+        Precise = 0,
+        Unit = "",
+        Callback = function(number)
+            if suppressUiCallbacks then
+                return
+            end
+            local parsed = tonumber(number)
+            if not parsed then
+                return
+            end
+            if parsed < MIN_FLY_SPEED then
+                parsed = MIN_FLY_SPEED
+            elseif parsed > MAX_FLY_SPEED then
+                parsed = MAX_FLY_SPEED
+            end
+            STATE.flySpeed = math.floor(parsed + 0.5)
+            refreshUiIfReady()
+        end
+    })
+
+    movementTab:Label({
+        Text = "Fly controls: WASD + Space/Ctrl",
+        Side = "Left"
+    })
+
+    configTab:Divider({ Text = "Profile Configs", Side = "Left" })
+
+    configNameTextbox = configTab:Textbox({
+        Name = "Config Name",
+        Side = "Left",
+        Value = "",
+        Placeholder = "Type name and press Enter",
+        NumbersOnly = false,
+        AutoClear = false,
+        Callback = function(text)
+            if suppressUiCallbacks then
+                return
+            end
+            pendingConfigName = string.match(tostring(text or ""), "^%s*(.-)%s*$") or ""
+            if pendingConfigName ~= "" then
+                selectedConfigName = sanitizeConfigName(pendingConfigName)
+            end
+            refreshUiIfReady()
+        end
+    })
+
+    configDropdown = configTab:Dropdown({
+        Name = "Saved Configs",
+        Side = "Left",
+        List = {}
+    })
+
+    configTab:Button({
+        Name = "Save Config",
+        Side = "Left",
+        Callback = function()
+            local name = resolveConfigName()
+            local saved, result = saveFullConfig(name)
+            if saved then
+                selectedConfigName = result
+                pendingConfigName = result
+                rebuildConfigDropdown()
+                pushMessage("Config saved: " .. tostring(result))
+            else
+                pushMessage("Save failed: " .. tostring(result))
+            end
+        end
+    })
+
+    configTab:Button({
+        Name = "Load Config",
+        Side = "Left",
+        Callback = function()
+            local name = resolveConfigName()
+            local loaded, result = loadFullConfig(name)
+            if loaded then
+                selectedConfigName = result
+                pendingConfigName = result
+                rebuildOreDropdowns()
+                rebuildConfigDropdown()
+                pushMessage("Config loaded: " .. tostring(result))
+                refreshUiIfReady()
+            else
+                pushMessage("Load failed: " .. tostring(result))
+            end
+        end
+    })
+
+    configTab:Button({
+        Name = "Delete Config",
+        Side = "Left",
+        Callback = function()
+            local name = resolveConfigName()
+            local deleted, result = deleteFullConfig(name)
+            if deleted then
+                if selectedConfigName == result then
+                    selectedConfigName = nil
+                end
+                if cachedDefaultConfigName == result then
+                    setDefaultFullConfigName(nil)
+                    cachedDefaultConfigName = nil
+                end
+                pendingConfigName = ""
+                rebuildConfigDropdown()
+                pushMessage("Config deleted: " .. tostring(result))
+            else
+                pushMessage("Delete failed: " .. tostring(result))
+            end
+        end
+    })
+
+    configTab:Button({
+        Name = "Set As Default",
+        Side = "Left",
+        Callback = function()
+            local name = resolveConfigName()
+            local okSet, setErr = setDefaultFullConfigName(name)
+            if okSet then
+                selectedConfigName = name
+                pendingConfigName = name
+                cachedDefaultConfigName = name
+                pushMessage("Default config set: " .. tostring(name))
+                refreshUiIfReady()
+            else
+                pushMessage("Set default failed: " .. tostring(setErr))
+            end
+        end
+    })
+
+    configTab:Button({
+        Name = "Load Default",
+        Side = "Left",
+        Callback = function()
+            local okDefault, defaultNameOrErr = getDefaultFullConfigName()
+            if not okDefault then
+                pushMessage("Default lookup failed: " .. tostring(defaultNameOrErr))
+                return
+            end
+
+            local defaultName = defaultNameOrErr
+            if not defaultName or defaultName == "" then
+                pushMessage("No default config set")
+                return
+            end
+            cachedDefaultConfigName = defaultName
+
+            local loaded, result = loadFullConfig(defaultName)
+            if loaded then
+                selectedConfigName = result
+                pendingConfigName = result
+                rebuildOreDropdowns()
+                rebuildConfigDropdown()
+                pushMessage("Default config loaded: " .. tostring(result))
+                refreshUiIfReady()
+            else
+                pushMessage("Load default failed: " .. tostring(result))
+            end
+        end
+    })
+
+    configTab:Button({
+        Name = "Refresh Config List",
+        Side = "Left",
+        Callback = function()
+            local ok, err = rebuildConfigDropdown()
+            local okDefault, defaultName = getDefaultFullConfigName()
+            if okDefault then
+                cachedDefaultConfigName = defaultName
+            end
+            if ok then
+                pushMessage("Config list refreshed")
+            else
+                pushMessage("Refresh failed: " .. tostring(err))
+            end
+            refreshUiIfReady()
+        end
+    })
+
+    defaultConfigLabel = configTab:Label({
+        Text = "Default: none",
+        Side = "Left"
+    })
+
+    infoTab:Divider({ Text = "Live Status", Side = "Left" })
+    statusLabel = infoTab:Label({ Text = "Status: Initializing", Side = "Left" })
+    messageLabel = infoTab:Label({ Text = "Message: Ready", Side = "Left" })
+    sandLabel = infoTab:Label({ Text = "Sand: not set", Side = "Left" })
+    waterLabel = infoTab:Label({ Text = "Water: not set", Side = "Left" })
+    shakeLabel = infoTab:Label({ Text = "Shake: default", Side = "Left" })
+    merchantLabel = infoTab:Label({ Text = "Merchant: waiting", Side = "Left" })
+    flyLabel = infoTab:Label({ Text = "Fly: off", Side = "Left" })
+    panLabel = infoTab:Label({ Text = "Pan: Detecting...", Side = "Left" })
+    lockSummaryLabel = infoTab:Label({ Text = "Lock Ores: None", Side = "Left" })
+    unlockSummaryLabel = infoTab:Label({ Text = "Unlock Ores: None", Side = "Left" })
+    wayLabel = infoTab:Label({ Text = "Merchant Way: none", Side = "Left" })
+
+    infoTab:Button({
+        Name = "Close UI + Stop Script",
+        Side = "Left",
+        Callback = function()
+            stopThisInstance()
+        end
+    })
+
+    local function refreshUi()
+        withSuppressedCallbacks(function()
+            if autoFarmToggle then
+                autoFarmToggle:SetValue(STATE.running)
+            end
+            if autoSellToggle then
+                autoSellToggle:SetValue(STATE.autoSell)
+            end
+            if autoLockToggle then
+                autoLockToggle:SetValue(STATE.autoLockEnabled)
+            end
+            if autoUnlockToggle then
+                autoUnlockToggle:SetValue(STATE.autoUnlockEnabled)
+            end
+            if flyToggle then
+                flyToggle:SetValue(STATE.flyEnabled)
+            end
+            if flySpeedSlider then
+                flySpeedSlider:SetValue(STATE.flySpeed)
+            end
+            if merchantSpeedSlider then
+                merchantSpeedSlider:SetValue(getMerchantSlideSpeed())
+            end
+            if shakeTextbox then
+                shakeTextbox:SetValue(STATE.customShakeTime and string.format("%.2f", STATE.customShakeTime) or "")
+            end
+            if merchantIntervalTextbox then
+                merchantIntervalTextbox:SetValue(string.format("%.2f", getMerchantIntervalMinutes()))
+            end
+            if configNameTextbox then
+                local configText = pendingConfigName
+                if (not configText or configText == "") and selectedConfigName then
+                    configText = selectedConfigName
+                end
+                configNameTextbox:SetValue(configText or "")
+            end
+            if lockOreDropdown then
+                lockOreDropdown:SetValue(getSelectedAutoLockOreList())
+            end
+            if unlockOreDropdown then
+                unlockOreDropdown:SetValue(getSelectedAutoUnlockOreList())
+            end
+            if configDropdown then
+                if selectedConfigName and selectedConfigName ~= "" then
+                    configDropdown:SetValue({ selectedConfigName })
+                else
+                    configDropdown:SetValue({})
+                end
+            end
+        end)
+
+        if lockOreDropdown and type(lockOreDropdown.SetName) == "function" then
+            lockOreDropdown:SetName("Lock Ores: " .. formatSelectedAutoLockOreSummary())
+        end
+        if unlockOreDropdown and type(unlockOreDropdown.SetName) == "function" then
+            unlockOreDropdown:SetName("Unlock Ores: " .. formatSelectedAutoUnlockOreSummary())
+        end
+
+        local statusText
+        if STATE.pausedForMerchant then
+            statusText = "Merchant trip active (autofarm paused)"
+        elseif STATE.running then
+            statusText = STATE.autoSell and "Farming + AutoSell" or "Farming (No AutoSell)"
+        else
+            statusText = STATE.autoSell and "Paused (AutoSell ready)" or "Paused"
+        end
+
+        local nextAt = STATE.nextMerchantSellAt
+        if type(nextAt) ~= "number" or nextAt <= 0 then
+            nextAt = getNowTime() + getMerchantIntervalSeconds()
+        end
+        local remainingSeconds = nextAt - getNowTime()
+        if remainingSeconds < 0 then
+            remainingSeconds = 0
+        end
+
+        local wayStatus = "none"
+        if STATE.merchantWayRecording then
+            wayStatus = string.format("recording (%d points)", #STATE.merchantWaypoints)
+        elseif hasRecordedMerchantWay() then
+            wayStatus = string.format("saved (%d points)", #STATE.merchantWaypoints)
+        end
+
+        setLabelText(statusLabel, "Status: " .. statusText)
+        setLabelText(messageLabel, "Message: " .. tostring(lastMessage))
+        setLabelText(sandLabel, "Sand: " .. formatPosition(STATE.sandPosition))
+        setLabelText(waterLabel, "Water: " .. formatPosition(STATE.waterPosition))
+        setLabelText(shakeLabel, "Shake: " .. formatShakeDuration())
+        setLabelText(
+            merchantLabel,
+            string.format(
+                "Merchant: %s | Speed: %d (next in %ds)",
+                formatMerchantInterval(),
+                getMerchantSlideSpeed(),
+                math.floor(remainingSeconds + 0.5)
+            )
+        )
+        setLabelText(flyLabel, string.format("Fly: %s @ %d", STATE.flyEnabled and "ON" or "OFF", STATE.flySpeed))
+        setLabelText(panLabel, "Pan: " .. tostring(STATE.activePanName))
+        setLabelText(lockSummaryLabel, "Lock Ores: " .. formatSelectedAutoLockOreSummary())
+        setLabelText(unlockSummaryLabel, "Unlock Ores: " .. formatSelectedAutoUnlockOreSummary())
+        setLabelText(wayLabel, "Merchant Way: " .. wayStatus)
+
+        setLabelText(defaultConfigLabel, "Default: " .. (cachedDefaultConfigName and cachedDefaultConfigName ~= "" and cachedDefaultConfigName or "none"))
+    end
+
+    STATE.refreshUi = refreshUi
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+        if STATE.closed or gameProcessedEvent then
+            return
+        end
+
+        local inputType = input.UserInputType
+        if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then
+            return
+        end
+
+        task.defer(function()
+            if STATE.closed then
+                return
+            end
+
+            local screen = STATE.bracketScreen
+            if typeof(screen) ~= "Instance" or not screen.Parent then
+                return
+            end
+
+            local pos = input.Position
+            local hitObjects = GuiService:GetGuiObjectsAtPosition(pos.X, pos.Y)
+            for _, guiObject in ipairs(hitObjects) do
+                if isInsideBracketDropdownGui(guiObject) then
+                    return
+                end
+            end
+
+            closeBracketDropdownOverlays()
+        end)
+    end)
+
+    local loadedAtStart = false
+    local okDefaultName, defaultNameOrErr = getDefaultFullConfigName()
+    if okDefaultName then
+        cachedDefaultConfigName = defaultNameOrErr
+    end
+    if okDefaultName and defaultNameOrErr and defaultNameOrErr ~= "" then
+        local loadedDefault, loadedNameOrErr = loadFullConfig(defaultNameOrErr)
+        if loadedDefault then
+            loadedAtStart = true
+            selectedConfigName = loadedNameOrErr
+            pendingConfigName = loadedNameOrErr
+            lastMessage = "Loaded default config: " .. tostring(loadedNameOrErr)
+        else
+            lastMessage = "Default config load failed: " .. tostring(loadedNameOrErr)
+        end
+    elseif not okDefaultName then
+        lastMessage = "Config init failed: " .. tostring(defaultNameOrErr)
+    end
+
+    if not loadedAtStart then
+        local loadedLegacy = select(1, loadAutoLockConfig())
+        if loadedLegacy then
+            lastMessage = "Legacy lock config loaded"
+        end
+    end
+
+    rebuildOreDropdowns()
+    local rebuiltConfigDropdown, rebuiltConfigErr = rebuildConfigDropdown()
+    if not rebuiltConfigDropdown and not loadedAtStart then
+        lastMessage = "Config list error: " .. tostring(rebuiltConfigErr)
+    end
+
+    if STATE.autoSell and (type(STATE.nextMerchantSellAt) ~= "number" or STATE.nextMerchantSellAt <= 0) then
+        scheduleNextMerchantSell()
+    end
+
+    refreshUi()
+end
+
+local guiOk, guiErr = pcall(createBracketGui)
+if not guiOk then
+    warn("Bracket UI failed, falling back to legacy UI:", guiErr)
+    local legacyOk, legacyErr = pcall(createGui)
+    if not legacyOk then
+        warn("GUI failed to load, autofarm still running:", legacyErr)
+    end
+end
+
+task.spawn(function()
+    while not STATE.closed do
+        if STATE.running then
+            local ok, err = pcall(runOneCycle)
+            if not ok then
+                warn("Autofarm cycle failed:", err)
+                task.wait(1)
+            end
+        else
+            task.wait(0.15)
+        end
+    end
+end)
+
+task.spawn(function()
+    while not STATE.closed do
+        local dt = RunService.Heartbeat:Wait()
+
+        if not STATE.flyEnabled then
+            STATE.flyTargetPosition = nil
+        else
+            local character = player.Character
+            if character then
+                local hrp = character:FindFirstChild("HumanoidRootPart")
+                local humanoid = character:FindFirstChildOfClass("Humanoid")
+                if hrp and humanoid then
+                    if humanoid.Sit then
+                        humanoid.Sit = false
+                    end
+
+                    if not STATE.flyTargetPosition then
+                        STATE.flyTargetPosition = hrp.Position
+                    end
+
+                    local direction = getFlyDirection()
+                    STATE.flyTargetPosition = STATE.flyTargetPosition + (direction * STATE.flySpeed * dt)
+
+                    hrp.CFrame = CFrame.new(STATE.flyTargetPosition)
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                else
+                    STATE.flyTargetPosition = nil
+                end
+            else
+                STATE.flyTargetPosition = nil
+            end
+        end
+
+        if STATE.merchantWayRecording then
+            local character = player.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                addMerchantWayPoint(hrp.Position, true)
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    local toggleLockRemote = getToggleLockRemote()
+
+    while not STATE.closed do
+        local hasLockTargets = hasSelectedAutoLockOres()
+        local hasUnlockTargets = hasSelectedAutoUnlockOres()
+        if (STATE.autoLockEnabled and hasLockTargets) or (STATE.autoUnlockEnabled and hasUnlockTargets) then
+            if STATE.autoLockEnabled then
+                local ok, err = pcall(runAutoLockPass, toggleLockRemote)
+                if not ok then
+                    warn("AutoLock pass failed:", err)
+                    task.wait(1)
+                else
+                    task.wait(AUTO_LOCK_TICK)
+                end
+            elseif STATE.autoUnlockEnabled then
+                local ok, err = pcall(runAutoUnlockPass, toggleLockRemote)
+                if not ok then
+                    warn("AutoUnlock pass failed:", err)
+                    task.wait(1)
+                else
+                    task.wait(AUTO_LOCK_TICK)
+                end
+            else
+                task.wait(0.2)
+            end
+        else
+            task.wait(0.2)
+        end
+    end
+end)
