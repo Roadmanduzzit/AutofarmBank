@@ -1929,8 +1929,8 @@ end
 
 return Hawk
         end)()
-	local Window = Hawk:Window({
-	ScriptName = "Rise",
+local Window = Hawk:Window({
+	ScriptName = "Focus",
 	DestroyIfExists = true, --if false, gui wont disappear
 	Theme = "Dark" --Themes: Pink, White, Dark
 })
@@ -1955,7 +1955,7 @@ Window:Minimize({
 local Notifications = Hawk:AddNotifications()
 
 Notifications:Notification({
-	Title = "Welcome to Rise Scripts!",
+	Title = "Welcome to Focus Scripts!",
 	Description = "UI loaded successfully.",
 	Selection = "Done",
 	Animated = true,
@@ -1965,9 +1965,9 @@ Notifications:Notification({
 
 local tab1 = Window:Tab("Home")
 
-local label = tab1:Label("Welcome To Rise!","Supported Game: Murder Mystery 2")
+local label = tab1:Label("Welcome To Focus!","Supported Game: Murder Mystery 2")
 
-local label = tab1:Label("Enjoy using Rise","Thank you for choosing Rise.")
+local label = tab1:Label("Enjoy using Focus","Thank you for choosing Focus.")
 
 tab1:Paragraph("Update List",{"No Update Yet :("})
 
@@ -4434,4 +4434,3 @@ if tab7 then
 else
 	warn("Tab7 bulunamadı! AutoFarm UI oluşturulamadı.")
 end
-
