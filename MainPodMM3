@@ -324,6 +324,7 @@ local function BuildWindow(options)
 
     local main = New("Frame", {
         BackgroundColor3 = Theme.Bg,
+        ClipsDescendants = true,
         Size = UDim2.new(0, winWidth, 0, winHeight),
         Position = UDim2.new(0.5, 0, 0.5, 0),
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -902,6 +903,7 @@ local function BuildWindow(options)
         end
 
         function pageApi:Button(title, description, callback)
+            description = nil
             local height = description and 56 or 44
             local card = CreateCard(height, false)
 
@@ -977,6 +979,7 @@ local function BuildWindow(options)
         end
 
         function pageApi:Toggle(title, description, defaultValue, callback)
+            description = nil
             local height = description and 60 or 46
             local card = CreateCard(height, false)
 
@@ -1076,6 +1079,7 @@ local function BuildWindow(options)
         end
 
         function pageApi:Slider(title, description, minValue, maxValue, callback)
+            description = nil
             local height = description and 74 or 60
             local card = CreateCard(height, false)
             local value = minValue
@@ -1237,6 +1241,7 @@ local function BuildWindow(options)
 
         function pageApi:TextBox(config)
             config = config or {}
+            config.Description = nil
 
             local hasDescription = not not config.Description
             local cardHeight = hasDescription and 88 or 66
@@ -1319,6 +1324,7 @@ local function BuildWindow(options)
 
         function pageApi:Dropdown(config)
             config = config or {}
+            config.Description = nil
 
             local options = {}
             for _, option in ipairs(config.List or {}) do
@@ -1500,6 +1506,7 @@ local function BuildWindow(options)
         end
 
         function pageApi:KeyBind(title, description, defaultKey, callback)
+            description = nil
             local height = description and 60 or 46
             local card = CreateCard(height, false)
 
